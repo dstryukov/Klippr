@@ -9,37 +9,23 @@ logger = logging.getLogger(__name__)
 
 class HighlightAnalyzer:
     def __init__(self):
-        # OpenRouter Setup
-        or_api_key = None
-        if settings.OPENROUTER_API_KEY:
-            or_api_key = settings.OPENROUTER_API_KEY.get_secret_value()
-            
-        self.openrouter_client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=or_api_key or "dummy_or_key",
-        )
-        self.openrouter_model = settings.OPENROUTER_MODEL
-
-        # Groq Setup (Fallback)
-        groq_api_key = None
-        if settings.GROQ_API_KEY:
-            groq_api_key = settings.GROQ_API_KEY.get_secret_value()
-            
-        self.groq_client = OpenAI(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=groq_api_key or "dummy_groq_key",
-        )
-        self.groq_model = settings.GROQ_MODEL
+        self.provider = settings.LLM_PROVIDER
+        self.model = settings.LLM_MODEL
+        
+        if self.provider == "openrouter":
+            or_api_key = settings.OPENROUTER_API_KEY.get_secret_value() if settings.OPENROUTER_API_KEY else "dummy_or_key"
+            self.client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_api_key)
+        else:
+            groq_api_key = settings.GROQ_API_KEY.get_secret_value() if settings.GROQ_API_KEY else "dummy_groq_key"
+            self.client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_api_key)
 
     def _seconds_to_timecode(self, seconds: float) -> str:
-        """Converts seconds into [HH:MM:SS] format."""
         h = int(seconds // 3600)
         m = int((seconds % 3600) // 60)
         s = int(seconds % 60)
         return f"[{h:02d}:{m:02d}:{s:02d}]"
 
     def format_transcript(self, transcript: list[dict]) -> str:
-        """Formats the Whisper transcript list into a readable text with timecodes."""
         lines = []
         for segment in transcript:
             start_tc = self._seconds_to_timecode(segment["start"])
@@ -48,7 +34,6 @@ class HighlightAnalyzer:
         return "\n".join(lines)
 
     def _extract_json_array(self, text: str) -> list[dict]:
-        """Robustly extracts JSON array from a string, ignoring conversational fluff."""
         start_idx = text.find('[')
         end_idx = text.rfind(']')
         if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -63,7 +48,6 @@ class HighlightAnalyzer:
         reraise=True
     )
     def _call_llm_with_retry(self, client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> str:
-        """Helper to call LLM with automatic retry on 429 Too Many Requests."""
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -75,16 +59,15 @@ class HighlightAnalyzer:
         return response.choices[0].message.content.strip()
 
     def _get_highlights_from_llm(self, system_prompt: str, formatted_text: str) -> list[dict]:
-        """Handles 1 extra fallback loop on top of tenacity for JSON parse errors and provider fallbacks."""
         for attempt in range(2):
             content = ""
             try:
                 try:
-                    logger.info(f"Sending to OpenRouter (Model: {self.openrouter_model}, Attempt {attempt + 1})...")
-                    content = self._call_llm_with_retry(self.openrouter_client, self.openrouter_model, system_prompt, formatted_text)
+                    logger.info(f"Sending to {self.provider} (Model: {self.model}, Attempt {attempt + 1})...")
+                    content = self._call_llm_with_retry(self.client, self.model, system_prompt, formatted_text)
                 except Exception as e:
-                    logger.warning(f"OpenRouter API failed: {e}. Falling back to Groq (Model: {self.groq_model})...")
-                    content = self._call_llm_with_retry(self.groq_client, self.groq_model, system_prompt, formatted_text)
+                    logger.error(f"API Request failed: {e}")
+                    raise
                 
                 parsed_clips = self._extract_json_array(content)
                 logger.info(f"Successfully extracted {len(parsed_clips)} highlights.")
@@ -100,12 +83,11 @@ class HighlightAnalyzer:
                 if attempt == 1:
                     raise
             except Exception as e:
-                logger.error(f"Error calling LLM APIs (both failed): {e}")
+                logger.error(f"Error calling LLM APIs: {e}")
                 raise
         return []
 
     def chunk_transcript(self, transcript: list[dict], chunk_duration_sec: float = 900) -> list[list[dict]]:
-        """Splits the transcript into chunks of max `chunk_duration_sec` seconds (e.g., 15 minutes)."""
         chunks = []
         current_chunk = []
         current_start = 0.0
@@ -126,26 +108,119 @@ class HighlightAnalyzer:
             
         return chunks
 
-    def find_highlights(self, transcript: list[dict], num_clips: int = 3) -> list[dict]:
-        """
-        Sends chunks of transcript to LLM to identify the best moments.
-        Returns a parsed JSON array of clip dictionaries.
-        """
+    def _validate_and_fix_highlights(self, highlights: list[dict], transcript: list[dict]) -> list[dict]:
+        if not transcript:
+            return highlights
+            
+        max_duration = transcript[-1]["end"]
+        valid_highlights = []
+        
+        # Read from settings dynamically
+        min_clip_len = settings.MIN_CLIP_DURATION
+        max_clip_len = settings.MAX_CLIP_DURATION
+        
+        for clip in highlights:
+            try:
+                start_sec = float(clip.get("start_time", 0))
+                end_sec = float(clip.get("end_time", 0))
+            except (ValueError, TypeError):
+                continue
+                
+            start_sec = max(0.0, start_sec)
+            end_sec = min(max_duration, end_sec)
+            
+            if start_sec >= end_sec:
+                continue
+                
+            duration = end_sec - start_sec
+            
+            if duration < min_clip_len:
+                start_idx = 0
+                end_idx = len(transcript) - 1
+                
+                for i, seg in enumerate(transcript):
+                    if seg["start"] <= start_sec <= seg["end"]:
+                        start_idx = i
+                    if seg["start"] <= end_sec <= seg["end"]:
+                        end_idx = i
+                        
+                while (transcript[end_idx]["end"] - transcript[start_idx]["start"]) < min_clip_len:
+                    expanded = False
+                    if start_idx > 0:
+                        start_idx -= 1
+                        expanded = True
+                    if end_idx < len(transcript) - 1 and (transcript[end_idx]["end"] - transcript[start_idx]["start"]) < min_clip_len:
+                        end_idx += 1
+                        expanded = True
+                        
+                    if not expanded:
+                        break
+                        
+                start_sec = transcript[start_idx]["start"]
+                end_sec = transcript[end_idx]["end"]
+                duration = end_sec - start_sec
+
+            elif duration > max_clip_len:
+                start_idx = 0
+                for i, seg in enumerate(transcript):
+                    if seg["start"] <= start_sec <= seg["end"]:
+                        start_idx = i
+                        break
+                        
+                end_idx = start_idx
+                while end_idx < len(transcript) - 1:
+                    next_end = transcript[end_idx + 1]["end"]
+                    if next_end - transcript[start_idx]["start"] > max_clip_len:
+                        break
+                    end_idx += 1
+                    
+                start_sec = transcript[start_idx]["start"]
+                end_sec = transcript[end_idx]["end"]
+                duration = end_sec - start_sec
+
+            if duration >= min_clip_len:
+                clip["start_time"] = round(start_sec, 2)
+                clip["end_time"] = round(end_sec, 2)
+                valid_highlights.append(clip)
+            else:
+                logger.warning(f"Dropped highlight '{clip.get('title')}' - could not expand to {min_clip_len} seconds.")
+                
+        return valid_highlights
+
+    def find_highlights(self, transcript: list[dict], num_clips: int = None) -> list[dict]:
+        if num_clips is None:
+            num_clips = settings.NUM_CLIPS
+            
+        min_clip_len = settings.MIN_CLIP_DURATION
+        max_clip_len = settings.MAX_CLIP_DURATION
+            
         chunks = self.chunk_transcript(transcript, chunk_duration_sec=900)
         logger.info(f"Transcript split into {len(chunks)} chunks (15 min max).")
         
-        system_prompt = f"""Ты — профессиональный AI-продюсер TikTok и YouTube Shorts. Твоя задача — найти в транскрипте видео самые виральные, эмоциональные и интересные моменты для нарезки.
-КРИТЕРИИ ОТБОРА:
-Завершенность мысли: Кусок должен иметь четкое начало и конец. Не вырезай фразы на полуслове.
-Эмоция или Инсайт: Ищи моменты смеха, спора, шока, или очень сильные полезные советы.
-Хук (Крючок): Первые 3 секунды клипа должны цеплять зрителя.
+        system_prompt = f"""Ты — профессиональный AI-продюсер TikTok и YouTube Shorts. Твоя задача — найти в транскрипте видео самые виральные моменты для нарезки на клипы.
+
+КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ:
+1. ДЛИНА КЛИПА: Каждый клип должен быть ОТ {min_clip_len} ДО {max_clip_len} СЕКУНД. Не больше, не меньше!
+2. ЗАВЕРШЕННОСТЬ: Клип должен иметь четкое начало и конец. Не вырезай фразы на полуслове.
+3. ХУК: Первые 3-5 секунд клипа должны цеплять зрителя (вопрос, шок, инсайт).
+4. КОНТЕКСТ: Если момент короткий, расширь его, добавив контекст до и после.
+
+КРИТЕРИИ ОТБОРА (в порядке важности):
+- Сильная эмоция (смех, шок, спор, удивление)
+- Полезный инсайт или совет
+- Интересная история или пример
+- Неожиданный поворот мысли
+
 ФОРМАТ ОТВЕТА:
-Верни СТРОГО валидный JSON-массив без markdown. Каждый объект должен содержать:
-start_time: float (в секундах, из таймкода)
-end_time: float (в секундах)
-title: string (цепляющий заголовок для клипа, до 50 символов)
-reason: string (почему это вирально, 1 предложение)
-Найди ровно {num_clips} лучших моментов."""
+Верни СТРОГО валидный JSON-массив без markdown. Каждый объект:
+{{
+  "start_time": float (в секундах, минимум {min_clip_len} сек до end_time),
+  "end_time": float (в секундах, максимум {max_clip_len} сек от start_time),
+  "title": string (цепляющий заголовок, до 50 символов),
+  "reason": string (почему это вирально, 1 предложение)
+}}
+
+Найди ровно {num_clips} лучших моментов. Если видео слишком короткое для {num_clips} клипов по {min_clip_len} секунд, верни столько, сколько возможно."""
 
         all_highlights = []
         for i, chunk in enumerate(chunks):
@@ -153,18 +228,14 @@ reason: string (почему это вирально, 1 предложение)
             formatted_text = self.format_transcript(chunk)
             try:
                 clips = self._get_highlights_from_llm(system_prompt, formatted_text)
+                clips = self._validate_and_fix_highlights(clips, transcript)
                 all_highlights.extend(clips)
             except Exception as e:
                 logger.error(f"Skipping chunk {i+1} due to error: {e}")
                 
-        # For MVP: just return the first `num_clips` we collected across chunks
         return all_highlights[:num_clips]
 
     def snap_to_silence(self, highlights: list[dict], audio_path: str, transcript: list[dict]) -> list[dict]:
-        """
-        Snaps highlight boundaries to the nearest silence to avoid cutting words in half.
-        Also uses the transcript to expand boundaries if a boundary cuts a transcript segment.
-        """
         try:
             from pydub import AudioSegment
             from pydub.silence import detect_silence
@@ -189,7 +260,6 @@ reason: string (почему это вирально, 1 предложение)
                 return target_ms
                 
             chunk = audio[search_start:search_end]
-            
             silences = detect_silence(chunk, min_silence_len=200, silence_thresh=chunk.dBFS - 16)
             
             if not silences:
@@ -232,8 +302,11 @@ reason: string (почему это вирально, 1 предложение)
                 if seg_start + 0.1 < new_end_sec < seg_end - 0.1:
                     new_end_sec = seg_end
             
-            adjusted_clip["start_time"] = round(new_start_sec, 2)
-            adjusted_clip["end_time"] = round(new_end_sec, 2)
-            adjusted_highlights.append(adjusted_clip)
+            if new_end_sec - new_start_sec >= (settings.MIN_CLIP_DURATION - 0.5):
+                adjusted_clip["start_time"] = round(new_start_sec, 2)
+                adjusted_clip["end_time"] = round(new_end_sec, 2)
+                adjusted_highlights.append(adjusted_clip)
+            else:
+                adjusted_highlights.append(clip)
             
         return adjusted_highlights

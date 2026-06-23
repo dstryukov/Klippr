@@ -1,34 +1,41 @@
 import os
 import logging
+from moviepy.editor import VideoFileClip
 from core.renderer import VerticalRenderer
 from core.ingestion import VideoIngestor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def main():
-    # 1. Download short video first (18s "Me at the zoo")
     test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
     ingestor = VideoIngestor(temp_dir="tmp")
     
     try:
         video_path = ingestor.download_video(test_url)
         
-        # 2. Define a fake highlight (we don't call LLM here to save time/tokens)
         dummy_highlight = {
-            "start_time": 2.0,
-            "end_time": 7.0,
-            "title": "Смотрите, какие у них классные длинные хоботы!",
-            "reason": "Funny and iconic first youtube video moment."
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "title": "Тест кропа 1080x1920",
+            "reason": "Verify cropping pipeline and resolution"
         }
         
-        # 3. Render
-        renderer = VerticalRenderer(output_dir="output")
-        output_path = os.path.join("output", "test_clip.mp4")
+        # Test the renderer with smart_center (or face_tracking if changed in config)
+        renderer = VerticalRenderer(output_dir="output", resolution=(1080, 1920))
+        output_path = os.path.join("output", "test_clip_1080p.mp4")
         
         renderer.render_clip(video_path, dummy_highlight, output_path)
         
-        print(f"\nУспешно! Видео сохранено в: {output_path}")
-        print("Посмотрите его, чтобы оценить кроп и субтитры.")
+        # Verify resolution
+        final = VideoFileClip(output_path)
+        print(f"\nИтоговое разрешение: {final.size[0]}x{final.size[1]}")
+        
+        assert final.size[0] == 1080, f"Width is {final.size[0]}, expected 1080!"
+        assert final.size[1] == 1920, f"Height is {final.size[1]}, expected 1920!"
+        
+        final.close()
+        
+        print(f"Успешно! Видео сохранено в: {output_path}")
         
     except Exception as e:
         logging.error(f"Test failed: {e}")

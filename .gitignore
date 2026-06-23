@@ -112,3 +112,4 @@ C:/Users/masteruser/.gemini/antigravity-ide/brain/
 # Klippr output and temp dirs
 tmp/
 output/
+.streamlit/

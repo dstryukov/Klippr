@@ -1,0 +1,13 @@
+crop_mode: smart_center
+device: cuda
+llm_model: google/gemini-2.5-flash-preview-05-20
+llm_provider: openrouter
+max_clip_duration: 90
+min_clip_duration: 30
+num_clips: 3
+output_resolution: 1080x1920
+subtitle_color: white
+subtitle_font_size: 70
+subtitle_stroke_color: black
+subtitle_style: title_only
+whisper_model: small

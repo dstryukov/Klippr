@@ -3,6 +3,8 @@ import logging
 import yt_dlp
 import ffmpeg
 from faster_whisper import WhisperModel
+import torch
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -10,32 +12,33 @@ class VideoIngestor:
     def __init__(self, temp_dir: str = "tmp"):
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
-        # Initialize whisper model. Using 'base' model for decent speed/accuracy balance.
-        logger.info("Initializing faster-whisper model ('base')...")
-        self.whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+        
+        model_size = settings.WHISPER_MODEL
+        device = settings.DEVICE
+        
+        # Safe fallback if CUDA requested but not available
+        actual_device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if actual_device == "cuda" else "int8"
+        
+        logger.info(f"Initializing faster-whisper model ('{model_size}') on {actual_device}...")
+        self.whisper_model = WhisperModel(model_size, device=actual_device, compute_type=compute_type)
         logger.info("Whisper model initialized.")
 
     def download_video(self, url: str) -> str:
-        """Downloads a video from YouTube (or other sources) using yt-dlp."""
         logger.info(f"Downloading video from {url}...")
         ydl_opts = {
-            'format': 'best',
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': os.path.join(self.temp_dir, '%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
         }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                video_path = ydl.prepare_filename(info)
-                logger.info(f"Video downloaded successfully: {video_path}")
-                return video_path
-        except Exception as e:
-            logger.error(f"Error downloading video: {e}")
-            raise
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_path = ydl.prepare_filename(info)
+            logger.info(f"Video downloaded successfully: {video_path}")
+            return video_path
 
     def extract_audio(self, video_path: str) -> str:
-        """Extracts audio to .wav format (16kHz, mono) using ffmpeg."""
         logger.info(f"Extracting audio from {video_path}...")
         base_name = os.path.splitext(os.path.basename(video_path))[0]
         audio_path = os.path.join(self.temp_dir, f"{base_name}.wav")
@@ -46,34 +49,27 @@ class VideoIngestor:
                 .input(video_path)
                 .output(audio_path, acodec='pcm_s16le', ac=1, ar='16k')
                 .overwrite_output()
-                .run(quiet=True, capture_stdout=True, capture_stderr=True)
+                .run(capture_stdout=True, capture_stderr=True)
             )
             logger.info(f"Audio extracted successfully: {audio_path}")
             return audio_path
         except ffmpeg.Error as e:
-            error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-            logger.error(f"Error extracting audio: {error_msg}")
-            raise RuntimeError(f"FFmpeg error: {error_msg}")
-        except Exception as e:
-            logger.error(f"Error extracting audio: {e}")
-            raise
+            logger.error(f"FFmpeg error: {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to extract audio: {e.stderr.decode()}")
 
     def transcribe(self, audio_path: str) -> list[dict]:
-        """Transcribes audio using faster-whisper."""
         logger.info(f"Transcribing audio from {audio_path}...")
-        try:
-            segments, info = self.whisper_model.transcribe(audio_path, beam_size=5)
-            logger.info(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+        segments, info = self.whisper_model.transcribe(audio_path, beam_size=5)
+        
+        logger.info(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+        
+        transcript = []
+        for segment in segments:
+            transcript.append({
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text
+            })
             
-            result = []
-            for segment in segments:
-                result.append({
-                    "text": segment.text.strip(),
-                    "start": segment.start,
-                    "end": segment.end
-                })
-            logger.info(f"Transcription completed. Found {len(result)} segments.")
-            return result
-        except Exception as e:
-            logger.error(f"Error transcribing audio: {e}")
-            raise
+        logger.info(f"Transcription complete. Total segments: {len(transcript)}")
+        return transcript
