@@ -12,6 +12,6 @@ moviepy<2.0.0
 Pillow
 tenacity
 ultralytics
-streamlit==1.32.0
-pyyaml==6.0.1
-python-dotenv==1.0.1
+streamlit
+pyyaml
+python-dotenv
