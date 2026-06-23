@@ -108,3 +108,7 @@ venv.bak/
 
 # Project specific
 C:/Users/masteruser/.gemini/antigravity-ide/brain/
+
+# Klippr output and temp dirs
+tmp/
+output/
