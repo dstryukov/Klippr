@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Klippr Studio</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #09090b;
+      --panel: #111116;
+      --panel2: #17171f;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --line: #2a2a35;
+      --accent: #7c3aed;
+      --accent2: #22c55e;
+      --danger: #ef4444;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    button, input, textarea { font: inherit; }
+    .app { display: grid; grid-template-columns: 320px 1fr; min-height: 100vh; }
+    aside { border-right: 1px solid var(--line); padding: 22px; background: #0c0c11; position: sticky; top: 0; height: 100vh; overflow: auto; }
+    main { padding: 28px; max-width: 1400px; width: 100%; }
+    h1 { margin: 0 0 6px; font-size: 30px; }
+    h2 { margin: 0 0 14px; font-size: 20px; }
+    h3 { margin: 18px 0 10px; font-size: 16px; }
+    .muted { color: var(--muted); }
+    .brand { display: flex; gap: 10px; align-items: center; margin-bottom: 24px; }
+    .logo { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(135deg, var(--accent), #06b6d4); font-weight: 800; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin-bottom: 18px; }
+    .card.soft { background: var(--panel2); }
+    label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+    input, textarea, select { width: 100%; background: #0b0b10; color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; outline: none; }
+    textarea { resize: vertical; min-height: 86px; }
+    button { border: 0; border-radius: 12px; padding: 11px 14px; cursor: pointer; color: white; background: #27272f; }
+    button.primary { background: var(--accent); }
+    button.success { background: var(--accent2); color: #04140a; font-weight: 700; }
+    button.danger { background: var(--danger); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .grid { display: grid; gap: 18px; }
+    .grid.two { grid-template-columns: 1fr 1fr; }
+    .grid.three { grid-template-columns: repeat(3, 1fr); }
+    .tabs { display: flex; gap: 8px; margin: 24px 0 18px; flex-wrap: wrap; }
+    .tab { padding: 10px 13px; border: 1px solid var(--line); border-radius: 999px; background: #12121a; color: var(--muted); }
+    .tab.active { color: white; background: var(--accent); border-color: var(--accent); }
+    .project-list { display: grid; gap: 8px; }
+    .project-item { padding: 11px 12px; border: 1px solid var(--line); border-radius: 13px; background: #111117; cursor: pointer; }
+    .project-item.active { border-color: var(--accent); background: #1c1230; }
+    .project-name { font-weight: 700; font-size: 14px; }
+    .badge { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; color: var(--muted); font-size: 12px; }
+    .badge.good { color: #86efac; border-color: #166534; }
+    .badge.warn { color: #fbbf24; border-color: #92400e; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
+    .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 15px; }
+    .metric .value { font-size: 24px; font-weight: 800; margin-top: 4px; }
+    .progress-wrap { height: 12px; border-radius: 999px; background: #27272f; overflow: hidden; }
+    .progress { height: 100%; background: linear-gradient(90deg, var(--accent), #06b6d4); width: 0%; transition: width .25s ease; }
+    .candidate { border: 1px solid var(--line); border-radius: 16px; padding: 14px; background: #101017; margin-bottom: 10px; }
+    .candidate.selected { border-color: var(--accent2); background: #0e1b12; }
+    .candidate-title { font-weight: 800; margin-bottom: 6px; }
+    .candidate-text { color: var(--muted); line-height: 1.45; max-height: 90px; overflow: auto; }
+    .score { font-weight: 800; color: #facc15; }
+    .clip video { width: 100%; border-radius: 16px; border: 1px solid var(--line); background: #000; }
+    .toast { position: fixed; right: 22px; bottom: 22px; max-width: 520px; padding: 14px 16px; border-radius: 14px; background: #18181f; border: 1px solid var(--line); box-shadow: 0 20px 60px rgba(0,0,0,.45); display: none; white-space: pre-wrap; }
+    .toast.show { display: block; }
+    pre { background: #0b0b10; border: 1px solid var(--line); border-radius: 14px; padding: 14px; overflow: auto; color: #d4d4d8; }
+    @media (max-width: 900px) { .app { grid-template-columns: 1fr; } aside { position: static; height: auto; } .grid.two, .grid.three, .metrics { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand"><div class="logo">K</div><div><b>Klippr Studio</b><div class="muted">FastAPI edition</div></div></div>
+
+    <div class="card">
+      <h2>Новый проект</h2>
+      <label>Название</label>
+      <input id="newName" value="New shorts project" />
+      <label>YouTube URL</label>
+      <input id="newUrl" placeholder="https://www.youtube.com/watch?v=..." />
+      <div style="height:12px"></div>
+      <button class="primary" onclick="createProject()">Создать</button>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><h2>Проекты</h2><button onclick="loadProjects()">↻</button></div>
+      <div id="projects" class="project-list"></div>
+    </div>
+  </aside>
+
+  <main>
+    <h1 id="title">Klippr Studio</h1>
+    <div class="muted" id="subtitle">Создайте или выберите проект</div>
+
+    <div class="metrics">
+      <div class="metric"><div class="muted">Status</div><div class="value" id="mStatus">—</div></div>
+      <div class="metric"><div class="muted">Candidates</div><div class="value" id="mCandidates">0</div></div>
+      <div class="metric"><div class="muted">Selected</div><div class="value" id="mSelected">0</div></div>
+      <div class="metric"><div class="muted">Rendered</div><div class="value" id="mRendered">0</div></div>
+    </div>
+
+    <div id="jobCard" class="card soft" style="display:none">
+      <div class="row" style="justify-content:space-between"><b id="jobStage">Job running</b><span id="jobStatus" class="badge warn">running</span></div>
+      <div style="height:10px"></div>
+      <div class="progress-wrap"><div id="jobProgress" class="progress"></div></div>
+      <pre id="jobError" style="display:none"></pre>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="source" onclick="showTab('source')">1 Source</button>
+      <button class="tab" data-tab="analyze" onclick="showTab('analyze')">2 Analyze</button>
+      <button class="tab" data-tab="review" onclick="showTab('review')">3 Review</button>
+      <button class="tab" data-tab="render" onclick="showTab('render')">4 Render</button>
+      <button class="tab" data-tab="export" onclick="showTab('export')">5 Export</button>
+    </div>
+
+    <section id="tab-source" class="tab-page">
+      <div class="card">
+        <h2>Source</h2>
+        <label>Project name</label>
+        <input id="projectName" />
+        <label>YouTube URL</label>
+        <input id="projectUrl" />
+        <label>Notes</label>
+        <textarea id="projectNotes"></textarea>
+        <div style="height:12px"></div>
+        <button class="primary" onclick="saveProject()">Сохранить</button>
+      </div>
+    </section>
+
+    <section id="tab-analyze" class="tab-page" style="display:none">
+      <div class="card">
+        <h2>Analyze</h2>
+        <p class="muted">Анализ запускается в фоне. Можно обновить страницу — job продолжит выполняться на сервере.</p>
+        <label>Candidates to preview</label>
+        <input id="candidateCount" type="number" min="1" max="30" value="12" />
+        <div style="height:12px"></div>
+        <button class="primary" onclick="startAnalyze()">🔎 Analyze / regenerate candidates</button>
+      </div>
+    </section>
+
+    <section id="tab-review" class="tab-page" style="display:none">
+      <div class="card">
+        <div class="row" style="justify-content:space-between"><h2>Review candidates</h2><button onclick="saveSelection()">Save selection</button></div>
+        <div id="candidates"></div>
+      </div>
+    </section>
+
+    <section id="tab-render" class="tab-page" style="display:none">
+      <div class="card">
+        <h2>Render</h2>
+        <p class="muted">Рендер также идёт в фоне и не зависит от соединения браузера.</p>
+        <button class="success" onclick="startRender()">🎬 Render selected</button>
+      </div>
+    </section>
+
+    <section id="tab-export" class="tab-page" style="display:none">
+      <div class="card">
+        <div class="row" style="justify-content:space-between"><h2>Export</h2><button onclick="refreshActiveProject()">↻ Обновить</button></div>
+        <div id="clips" class="grid three"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+let state = { projects: [], activeId: localStorage.getItem('klippr.activeProjectId') || null, active: null, candidates: [], selected: new Set(), pollingJob: null };
+
+function toast(message) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 5000);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (!res.ok) {
+    let detail = await res.text();
+    try { detail = JSON.parse(detail).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+function showTab(tab) {
+  document.querySelectorAll('.tab-page').forEach(el => el.style.display = 'none');
+  document.getElementById('tab-' + tab).style.display = '';
+  document.querySelectorAll('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+}
+
+async function loadProjects() {
+  try {
+    const data = await api('/api/projects');
+    state.projects = data.projects || [];
+    const list = document.getElementById('projects');
+    list.innerHTML = '';
+    for (const p of state.projects) {
+      const item = document.createElement('div');
+      item.className = 'project-item' + (p.id === state.activeId ? ' active' : '');
+      item.innerHTML = `<div class="project-name">${escapeHtml(p.name || p.id)}</div><div class="muted">${escapeHtml(p.status || 'created')} · ${(p.updated_at || '').slice(0,16).replace('T',' ')}</div>`;
+      item.onclick = () => selectProject(p.id);
+      list.appendChild(item);
+    }
+    if (!state.activeId && state.projects.length) await selectProject(state.projects[0].id);
+    else if (state.activeId) await refreshActiveProject(false);
+  } catch (e) { toast('Ошибка загрузки проектов: ' + e.message); }
+}
+
+async function createProject() {
+  try {
+    const data = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name: val('newName'), source_url: val('newUrl') }) });
+    await selectProject(data.project.id);
+    await loadProjects();
+    toast('Проект создан');
+  } catch (e) { toast('Ошибка создания проекта: ' + e.message); }
+}
+
+async function selectProject(id) {
+  state.activeId = id;
+  localStorage.setItem('klippr.activeProjectId', id);
+  await refreshActiveProject();
+  renderProjectListActive();
+}
+
+function renderProjectListActive() {
+  document.querySelectorAll('.project-item').forEach((el, idx) => el.classList.toggle('active', state.projects[idx] && state.projects[idx].id === state.activeId));
+}
+
+async function refreshActiveProject(showErrors = true) {
+  if (!state.activeId) return;
+  try {
+    const data = await api('/api/projects/' + encodeURIComponent(state.activeId));
+    state.active = data.project;
+    state.candidates = data.candidates || [];
+    state.selected = new Set((state.active.selected_candidate_ids || []).map(String));
+    renderActiveProject();
+  } catch (e) { if (showErrors) toast('Ошибка проекта: ' + e.message); }
+}
+
+function renderActiveProject() {
+  const p = state.active;
+  if (!p) return;
+  document.getElementById('title').textContent = p.name || 'Untitled project';
+  document.getElementById('subtitle').textContent = p.id;
+  document.getElementById('mStatus').textContent = p.status || 'created';
+  document.getElementById('mCandidates').textContent = state.candidates.length;
+  document.getElementById('mSelected').textContent = state.selected.size;
+  document.getElementById('mRendered').textContent = (p.clips || []).length;
+  setVal('projectName', p.name || '');
+  setVal('projectUrl', p.source_url || '');
+  setVal('projectNotes', p.notes || '');
+  renderCandidates();
+  renderClips();
+}
+
+async function saveProject() {
+  if (!state.activeId) return toast('Сначала выберите проект');
+  try {
+    await api('/api/projects/' + encodeURIComponent(state.activeId), { method: 'PATCH', body: JSON.stringify({ name: val('projectName'), source_url: val('projectUrl'), notes: val('projectNotes') }) });
+    await refreshActiveProject();
+    await loadProjects();
+    toast('Сохранено');
+  } catch (e) { toast('Ошибка сохранения: ' + e.message); }
+}
+
+async function startAnalyze() {
+  if (!state.activeId) return toast('Сначала выберите проект');
+  await saveProject();
+  try {
+    const job = await api(`/api/projects/${encodeURIComponent(state.activeId)}/analyze`, { method: 'POST', body: JSON.stringify({ candidate_count: Number(val('candidateCount') || 12) }) });
+    pollJob(job.id);
+    showTab('analyze');
+  } catch (e) { toast('Ошибка анализа: ' + e.message); }
+}
+
+async function startRender() {
+  if (!state.activeId) return toast('Сначала выберите проект');
+  if (!state.selected.size) return toast('Выберите кандидаты во вкладке Review');
+  try {
+    const job = await api(`/api/projects/${encodeURIComponent(state.activeId)}/render`, { method: 'POST', body: JSON.stringify({ candidate_ids: [...state.selected] }) });
+    pollJob(job.id);
+    showTab('render');
+  } catch (e) { toast('Ошибка рендера: ' + e.message); }
+}
+
+async function pollJob(jobId) {
+  state.pollingJob = jobId;
+  const card = document.getElementById('jobCard');
+  card.style.display = '';
+  async function tick() {
+    if (state.pollingJob !== jobId) return;
+    try {
+      const job = await api('/api/jobs/' + encodeURIComponent(jobId));
+      document.getElementById('jobStage').textContent = job.stage || job.kind;
+      document.getElementById('jobStatus').textContent = job.status;
+      document.getElementById('jobStatus').className = 'badge ' + (job.status === 'completed' ? 'good' : job.status === 'failed' ? 'danger' : 'warn');
+      document.getElementById('jobProgress').style.width = (job.progress || 0) + '%';
+      const error = document.getElementById('jobError');
+      if (job.error) { error.style.display = ''; error.textContent = job.error; }
+      else { error.style.display = 'none'; }
+      await refreshActiveProject(false);
+      if (job.status === 'completed' || job.status === 'failed') {
+        state.pollingJob = null;
+        await refreshActiveProject();
+        await loadProjects();
+        if (job.status === 'completed') toast('Job completed');
+        return;
+      }
+      setTimeout(tick, 1800);
+    } catch (e) {
+      toast('Ошибка polling job: ' + e.message);
+      setTimeout(tick, 3000);
+    }
+  }
+  tick();
+}
+
+function renderCandidates() {
+  const box = document.getElementById('candidates');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!state.candidates.length) {
+    box.innerHTML = '<p class="muted">Кандидатов пока нет. Запустите Analyze.</p>';
+    return;
+  }
+  state.candidates.forEach((c, idx) => {
+    const id = String(c.id || ('candidate_' + (idx + 1)));
+    const selected = state.selected.has(id);
+    const div = document.createElement('div');
+    div.className = 'candidate' + (selected ? ' selected' : '');
+    div.innerHTML = `
+      <div class="row" style="justify-content:space-between">
+        <label style="margin:0"><input type="checkbox" ${selected ? 'checked' : ''} data-candidate="${escapeHtml(id)}" /> ${escapeHtml(candidateLabel(idx, c))}</label>
+        <span class="score">${score(c).toFixed(0)}</span>
+      </div>
+      <div class="muted">Hook: ${escapeHtml(c.hook || '')}</div>
+      <div class="candidate-title">${escapeHtml(c.title || '')}</div>
+      <div class="candidate-text">${escapeHtml(c.text || c.reason || '')}</div>
+      <div class="muted">Scores: hook=${escapeHtml(c.hook_score ?? '-')}, standalone=${escapeHtml(c.standalone_score ?? '-')}, payoff=${escapeHtml(c.payoff_score ?? '-')}, retention=${escapeHtml(c.retention_score ?? '-')}, clarity=${escapeHtml(c.clarity_score ?? '-')}</div>
+    `;
+    div.querySelector('input').onchange = (e) => {
+      if (e.target.checked) state.selected.add(id); else state.selected.delete(id);
+      renderCandidates();
+      renderMetricsSelection();
+    };
+    box.appendChild(div);
+  });
+}
+
+async function saveSelection() {
+  if (!state.activeId) return;
+  try {
+    // Render endpoint persists candidate_ids, but we do a no-op project refresh here for now.
+    state.active.selected_candidate_ids = [...state.selected];
+    document.getElementById('mSelected').textContent = state.selected.size;
+    toast('Selection saved locally. Render will persist it.');
+  } catch (e) { toast('Ошибка selection: ' + e.message); }
+}
+
+function renderMetricsSelection() { document.getElementById('mSelected').textContent = state.selected.size; }
+
+function renderClips() {
+  const box = document.getElementById('clips');
+  if (!box) return;
+  const clips = (state.active && state.active.clips) || [];
+  box.innerHTML = '';
+  if (!clips.length) {
+    box.innerHTML = '<p class="muted">Клипов пока нет. Перейдите во вкладку Render.</p>';
+    return;
+  }
+  clips.forEach((clip, idx) => {
+    const filename = (clip.path || '').split(/[\\/]/).pop();
+    const url = `/api/projects/${encodeURIComponent(state.activeId)}/clips/${encodeURIComponent(filename)}`;
+    const div = document.createElement('div');
+    div.className = 'clip card';
+    div.innerHTML = `<h3>${escapeHtml(clip.title || ('Clip ' + (idx + 1)))}</h3><div class="muted">${formatTime(clip.start_time)}–${formatTime(clip.end_time)}</div><video controls src="${url}"></video><div style="height:10px"></div><a href="${url}" download><button>Download</button></a>`;
+    box.appendChild(div);
+  });
+}
+
+function candidateLabel(idx, clip) { return `${idx + 1}. ${formatTime(clip.start_time)}–${formatTime(clip.end_time)} | ${score(clip).toFixed(0)} | ${clip.title || 'Клип'}`; }
+function score(clip) { const n = Number(clip.total_score ?? clip.score ?? 0); return Number.isFinite(n) ? n : 0; }
+function formatTime(seconds) { seconds = Math.max(0, Number(seconds || 0)); const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); const s = Math.floor(seconds % 60); return h ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`; }
+function pad(n) { return String(n).padStart(2, '0'); }
+function val(id) { return document.getElementById(id).value; }
+function setVal(id, v) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; }
+function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+
+loadProjects();
+</script>
+</body>
+</html>
