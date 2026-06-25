@@ -120,11 +120,13 @@ class HighlightAnalyzer:
                 start_sec = float(clip.get("start_time", 0))
                 end_sec = float(clip.get("end_time", 0))
             except (ValueError, TypeError):
+                logger.warning("Dropped highlight with invalid timestamps: %s", clip)
                 continue
 
             start_sec = max(0.0, start_sec)
             end_sec = min(max_duration, end_sec)
             if start_sec >= end_sec:
+                logger.warning("Dropped highlight '%s' because start >= end after clamping.", clip.get("title"))
                 continue
 
             start_idx = min(range(len(transcript)), key=lambda i: abs(transcript[i]["start"] - start_sec))
@@ -165,10 +167,16 @@ class HighlightAnalyzer:
                     normalized["score"] = 50.0
                 valid_highlights.append(normalized)
             else:
-                logger.warning("Dropped highlight '%s' because duration %.1fs is outside %s-%ss.", clip.get("title"), duration, min_clip_len, max_clip_len)
+                logger.warning(
+                    "Dropped highlight '%s' because duration %.1fs is outside %s-%ss.",
+                    clip.get("title"),
+                    duration,
+                    min_clip_len,
+                    max_clip_len,
+                )
         return valid_highlights
 
-    def _remove_overlaps(self, highlights: list[dict]) -> list[dict]:
+    def _remove_overlaps(self, highlights: list[dict], max_overlap_ratio: float = 0.45) -> list[dict]:
         selected: list[dict] = []
         for clip in sorted(highlights, key=lambda x: float(x.get("score", 0)), reverse=True):
             start = float(clip["start_time"])
@@ -179,7 +187,7 @@ class HighlightAnalyzer:
                 c_end = float(chosen["end_time"])
                 overlap = max(0.0, min(end, c_end) - max(start, c_start))
                 shorter = max(1.0, min(end - start, c_end - c_start))
-                if overlap / shorter > 0.35:
+                if overlap / shorter > max_overlap_ratio:
                     overlaps = True
                     break
             if not overlaps:
@@ -197,6 +205,7 @@ class HighlightAnalyzer:
         keywords = (
             "важно", "секрет", "ошибка", "проблем", "почему", "как", "деньги", "результат",
             "никогда", "всегда", "главное", "инсайт", "смотри", "представь", "шок", "лучше",
+            "мама", "папа", "история", "смешно", "страшно", "конфликт", "вопрос", "ответ",
         )
         for i, seg in enumerate(transcript):
             text = seg.get("text", "").strip()
@@ -210,7 +219,7 @@ class HighlightAnalyzer:
             scored.append((score, i))
 
         candidates = []
-        for _, idx in sorted(scored, reverse=True)[: max(num_clips * 3, 6)]:
+        for _, idx in sorted(scored, reverse=True)[: max(num_clips * 4, 10)]:
             start_idx = idx
             end_idx = idx
             while transcript[end_idx]["end"] - transcript[start_idx]["start"] < min_len:
@@ -239,13 +248,20 @@ class HighlightAnalyzer:
     def find_highlights(self, transcript: list[dict], num_clips: int = None) -> list[dict]:
         if num_clips is None:
             num_clips = settings.NUM_CLIPS
+        num_clips = max(1, int(num_clips))
             
         min_clip_len = settings.MIN_CLIP_DURATION
         max_clip_len = settings.MAX_CLIP_DURATION
         chunks = self.chunk_transcript(transcript, chunk_duration_sec=900)
-        logger.info(f"Transcript split into {len(chunks)} chunks (15 min max).")
+        logger.info(
+            "Transcript split into %s chunks (15 min max). Requested %s clips with duration %s-%ss.",
+            len(chunks),
+            num_clips,
+            min_clip_len,
+            max_clip_len,
+        )
 
-        candidates_per_chunk = max(num_clips * 2, 6)
+        candidates_per_chunk = max(num_clips * 3, 8)
         system_prompt = f"""Ты — профессиональный продюсер коротких видео уровня TikTok/Reels/YouTube Shorts.
 Твоя задача — выбрать НЕ просто информативные куски, а моменты, которые зритель досмотрит и сохранит.
 
@@ -255,6 +271,7 @@ class HighlightAnalyzer:
 3. Не выбирай вступления, воду, приветствия, технические паузы и фрагменты без законченной мысли.
 4. Выбирай фрагменты с самодостаточным смыслом: зритель должен понять контекст без полного видео.
 5. Таймкоды должны быть в секундах от начала исходного видео.
+6. Не возвращай несколько почти одинаковых клипов подряд. Распредели кандидатов по разным местам видео.
 
 Верни СТРОГО валидный JSON-массив без markdown. Каждый объект:
 {{
@@ -274,18 +291,41 @@ class HighlightAnalyzer:
             try:
                 clips = self._get_highlights_from_llm(system_prompt, formatted_text)
                 clips = self._validate_and_fix_highlights(clips, transcript)
+                logger.info("Chunk %s produced %s valid candidates after duration validation.", i + 1, len(clips))
                 all_candidates.extend(clips)
             except Exception as e:
                 logger.error(f"Skipping LLM highlights for chunk {i + 1} due to error: {e}")
 
         if len(all_candidates) < num_clips:
-            logger.warning("LLM returned too few candidates (%s/%s). Adding local fallback candidates.", len(all_candidates), num_clips)
-            all_candidates.extend(self._fallback_highlights(transcript, num_clips))
+            logger.warning(
+                "LLM returned too few valid candidates (%s/%s). Adding local fallback candidates.",
+                len(all_candidates),
+                num_clips,
+            )
+            all_candidates.extend(self._fallback_highlights(transcript, num_clips * 2))
 
-        ranked = self._remove_overlaps(all_candidates)
+        ranked = self._remove_overlaps(all_candidates, max_overlap_ratio=0.45)
+        logger.info("Candidates before overlap removal: %s; after overlap removal: %s.", len(all_candidates), len(ranked))
+
+        if len(ranked) < num_clips:
+            logger.warning(
+                "Only %s non-overlapping candidates for %s requested clips. Adding fallback and relaxing overlap threshold.",
+                len(ranked),
+                num_clips,
+            )
+            all_candidates.extend(self._fallback_highlights(transcript, num_clips * 3))
+            ranked = self._remove_overlaps(all_candidates, max_overlap_ratio=0.75)
+
+        if len(ranked) < num_clips:
+            logger.warning(
+                "Still only %s candidates after relaxed overlap filtering. Keeping best available candidates even if they overlap.",
+                len(ranked),
+            )
+            ranked = sorted(all_candidates, key=lambda x: float(x.get("score", 0)), reverse=True)
+
         ranked = sorted(ranked, key=lambda x: float(x.get("score", 0)), reverse=True)[:num_clips]
         ranked = sorted(ranked, key=lambda x: x["start_time"])
-        logger.info("Selected %s final highlights.", len(ranked))
+        logger.info("Selected %s final highlights for %s requested clips.", len(ranked), num_clips)
         return ranked
 
     def snap_to_silence(self, highlights: list[dict], audio_path: str, transcript: list[dict]) -> list[dict]:
