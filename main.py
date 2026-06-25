@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Any, List
 
+import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Klippr API",
     description="AI service for cutting long videos into vertical clips",
-    version="0.2.0",
+    version="0.2.1",
 )
 
 
@@ -55,6 +56,28 @@ class RenderRequest(BaseModel):
     candidate_ids: list[str] = Field(default_factory=list)
 
 
+class SettingsUpdateRequest(BaseModel):
+    whisper_model: str | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    device: str | None = None
+    crop_mode: str | None = None
+    output_resolution: str | None = None
+    ffmpeg_preset: str | None = None
+    ffmpeg_crf: int | None = None
+    use_nvenc: bool | None = None
+    num_clips: int | None = None
+    highlight_candidate_count: int | None = None
+    min_clip_duration: int | None = None
+    max_clip_duration: int | None = None
+    subtitle_style: str | None = None
+    subtitle_font_size: int | None = None
+    subtitle_color: str | None = None
+    subtitle_active_color: str | None = None
+    subtitle_words_per_caption: int | None = None
+    subtitle_timing_offset_ms: int | None = None
+
+
 class VideoRequest(BaseModel):
     url: HttpUrl
     num_clips: int = Field(default=3, ge=1, le=10)
@@ -69,6 +92,63 @@ class ClipResponse(BaseModel):
 class ProcessResponse(BaseModel):
     job_id: str
     clips: List[ClipResponse]
+
+
+def current_settings_payload() -> dict[str, Any]:
+    return {
+        "whisper_model": getattr(settings, "WHISPER_MODEL", "small"),
+        "llm_provider": getattr(settings, "LLM_PROVIDER", "groq"),
+        "llm_model": getattr(settings, "LLM_MODEL", "llama-3.3-70b-versatile"),
+        "device": getattr(settings, "DEVICE", "cuda"),
+        "crop_mode": getattr(settings, "CROP_MODE", "smart_center"),
+        "output_resolution": getattr(settings, "OUTPUT_RESOLUTION", "1080x1920"),
+        "ffmpeg_preset": getattr(settings, "FFMPEG_PRESET", "fast"),
+        "ffmpeg_crf": int(getattr(settings, "FFMPEG_CRF", 23)),
+        "use_nvenc": bool(getattr(settings, "USE_NVENC", False)),
+        "num_clips": int(getattr(settings, "NUM_CLIPS", 3)),
+        "highlight_candidate_count": int(getattr(settings, "HIGHLIGHT_CANDIDATE_COUNT", 12)),
+        "min_clip_duration": int(getattr(settings, "MIN_CLIP_DURATION", 20)),
+        "max_clip_duration": int(getattr(settings, "MAX_CLIP_DURATION", 60)),
+        "subtitle_style": getattr(settings, "SUBTITLE_STYLE", "word_by_word"),
+        "subtitle_font_size": int(getattr(settings, "SUBTITLE_FONT_SIZE", 70)),
+        "subtitle_color": getattr(settings, "SUBTITLE_COLOR", "#FFFFFF"),
+        "subtitle_active_color": getattr(settings, "SUBTITLE_ACTIVE_COLOR", "#FFFF00"),
+        "subtitle_words_per_caption": int(getattr(settings, "SUBTITLE_WORDS_PER_CAPTION", 3)),
+        "subtitle_timing_offset_ms": int(getattr(settings, "SUBTITLE_TIMING_OFFSET_MS", -80)),
+    }
+
+
+def system_payload() -> dict[str, Any]:
+    cuda_available = False
+    gpu_name = ""
+    gpu_count = 0
+    current_device = None
+    torch_version = getattr(torch, "__version__", "unknown")
+    cuda_version = getattr(torch.version, "cuda", None)
+    error = ""
+    try:
+        cuda_available = bool(torch.cuda.is_available())
+        gpu_count = int(torch.cuda.device_count()) if cuda_available else 0
+        if cuda_available and gpu_count > 0:
+            current_device = int(torch.cuda.current_device())
+            gpu_name = torch.cuda.get_device_name(current_device)
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+
+    configured_device = getattr(settings, "DEVICE", "cpu")
+    effective_device = "cuda" if configured_device == "cuda" and cuda_available else "cpu"
+    return {
+        "torch_version": torch_version,
+        "torch_cuda_version": cuda_version,
+        "cuda_available": cuda_available,
+        "gpu_count": gpu_count,
+        "gpu_name": gpu_name,
+        "current_device": current_device,
+        "configured_device": configured_device,
+        "effective_device": effective_device,
+        "use_nvenc": bool(getattr(settings, "USE_NVENC", False)),
+        "error": error,
+    }
 
 
 def project_payload(project_id: str) -> dict[str, Any]:
@@ -86,6 +166,7 @@ def _analyze_project_job(job_id: str, project_id: str, candidate_count: int) -> 
         raise ValueError("Project source_url is empty")
 
     project["status"] = "analyzing"
+    project["settings_snapshot"] = current_settings_payload()
     save_project(project)
 
     job_manager.set_progress(job_id, 5, "Initializing downloader")
@@ -170,6 +251,40 @@ async def health_check():
 @app.get("/api/health")
 async def api_health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/system")
+async def api_system():
+    return system_payload()
+
+
+@app.get("/api/settings")
+async def api_get_settings():
+    return {"settings": current_settings_payload(), "system": system_payload()}
+
+
+@app.patch("/api/settings")
+async def api_update_settings(req: SettingsUpdateRequest):
+    incoming = req.model_dump(exclude_none=True)
+    allowed = current_settings_payload()
+    updates: dict[str, Any] = {}
+    for key, value in incoming.items():
+        if key not in allowed:
+            continue
+        updates[key] = value
+
+    if updates:
+        if "min_clip_duration" in updates and "max_clip_duration" in updates:
+            if int(updates["min_clip_duration"]) > int(updates["max_clip_duration"]):
+                raise HTTPException(status_code=400, detail="min_clip_duration cannot be greater than max_clip_duration")
+        elif "min_clip_duration" in updates:
+            if int(updates["min_clip_duration"]) > int(getattr(settings, "MAX_CLIP_DURATION", 60)):
+                raise HTTPException(status_code=400, detail="min_clip_duration cannot be greater than max_clip_duration")
+        elif "max_clip_duration" in updates:
+            if int(getattr(settings, "MIN_CLIP_DURATION", 20)) > int(updates["max_clip_duration"]):
+                raise HTTPException(status_code=400, detail="min_clip_duration cannot be greater than max_clip_duration")
+        settings.save(updates)
+    return {"settings": current_settings_payload(), "system": system_payload()}
 
 
 @app.get("/api/projects")
