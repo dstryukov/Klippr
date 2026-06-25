@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -124,13 +123,20 @@ def load_transcript(project_id: str) -> list[dict[str, Any]]:
         return json.load(f)
 
 
-def save_candidates(project_id: str, candidates: list[dict[str, Any]]) -> str:
+def normalize_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = []
     for idx, candidate in enumerate(candidates):
         item = dict(candidate)
         item.setdefault("id", f"candidate_{idx + 1}")
         item.setdefault("selected", False)
         normalized.append(item)
+    return normalized
+
+
+def save_candidates(project_id: str, candidates: list[dict[str, Any]]) -> str:
+    normalized = normalize_candidates(candidates)
+    candidates.clear()
+    candidates.extend(normalized)
     path = candidates_file(project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
