@@ -110,8 +110,24 @@ with col2:
     
     st.subheader("📝 Субтитры")
     sub_style = st.selectbox("Subtitle style", ['title_only', 'word_by_word'], index=['title_only', 'word_by_word'].index(settings.SUBTITLE_STYLE))
-    sub_font = st.slider("Subtitle font size", 30, 100, int(settings.SUBTITLE_FONT_SIZE))
-    sub_color = st.color_picker("Subtitle color", settings.SUBTITLE_COLOR if settings.SUBTITLE_COLOR.startswith("#") else "#FFFFFF")
+    sub_font = st.slider("Subtitle font size", 30, 110, int(settings.SUBTITLE_FONT_SIZE))
+    sub_color = st.color_picker("Subtitle color", settings.SUBTITLE_COLOR if str(settings.SUBTITLE_COLOR).startswith("#") else "#FFFFFF")
+    sub_active_color = st.color_picker("Active word color", getattr(settings, "SUBTITLE_ACTIVE_COLOR", "#FFFF00") if str(getattr(settings, "SUBTITLE_ACTIVE_COLOR", "#FFFF00")).startswith("#") else "#FFFF00")
+    sub_words_per_caption = st.slider(
+        "Words per caption",
+        1,
+        5,
+        int(getattr(settings, "SUBTITLE_WORDS_PER_CAPTION", 3)),
+        help="Для шортов обычно лучше 2–4. Активное слово подсвечивается по таймингу."
+    )
+    sub_timing_offset = st.slider(
+        "Subtitle timing offset (ms)",
+        -300,
+        300,
+        int(getattr(settings, "SUBTITLE_TIMING_OFFSET_MS", -80)),
+        step=10,
+        help="Отрицательное значение показывает слово чуть раньше. Для динамичных шортов часто хорошо -80…-120 мс."
+    )
 
 
 def current_ui_config() -> dict:
@@ -137,6 +153,9 @@ def current_ui_config() -> dict:
         "subtitle_style": sub_style,
         "subtitle_font_size": int(sub_font),
         "subtitle_color": sub_color,
+        "subtitle_active_color": sub_active_color,
+        "subtitle_words_per_caption": int(sub_words_per_caption),
+        "subtitle_timing_offset_ms": int(sub_timing_offset),
     }
 
 
@@ -171,7 +190,7 @@ if st.button("▶️ Начать", type="primary", use_container_width=True):
         run_config = current_ui_config()
         settings.save(run_config)
         logger.info(
-            "Starting run with num_clips=%s, duration=%s-%ss, provider=%s, model=%s, device=%s, crop=%s, subtitles=%s, resolution=%s, nvenc=%s",
+            "Starting run with num_clips=%s, duration=%s-%ss, provider=%s, model=%s, device=%s, crop=%s, subtitles=%s, subtitle_offset=%sms, words_per_caption=%s, resolution=%s, nvenc=%s",
             run_config["num_clips"],
             run_config["min_clip_duration"],
             run_config["max_clip_duration"],
@@ -180,6 +199,8 @@ if st.button("▶️ Начать", type="primary", use_container_width=True):
             run_config["device"],
             run_config["crop_mode"],
             run_config["subtitle_style"],
+            run_config["subtitle_timing_offset_ms"],
+            run_config["subtitle_words_per_caption"],
             run_config["output_resolution"],
             run_config["use_nvenc"],
         )
