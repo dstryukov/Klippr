@@ -19,16 +19,34 @@ AI service for cutting long videos into vertical clips (Reels/Shorts).
 - Встроенный портативный FFmpeg (скачивается автоматически через `imageio-ffmpeg`)
 - Опционально: GPU Nvidia для быстрого рендеринга и работы нейросетей локально.
 
-## Установка
+## Установка на Windows с NVIDIA CUDA
+PyTorch CUDA ставится отдельной командой из официального PyTorch wheel index. Если поставить обычный `requirements.txt` первым, pip может подтянуть CPU-сборку PyTorch через зависимости вроде `ultralytics`.
+
 ```bash
 python -m venv .venv
-
-# Windows
 .\.venv\Scripts\activate
 
-# Mac/Linux
-source .venv/bin/activate
+python -m pip install --upgrade pip
 
+# 1) Сначала CUDA PyTorch
+pip install -r requirements-gpu-cu126.txt
+
+# 2) Потом остальные зависимости проекта
+pip install -r requirements.txt
+```
+
+Проверка CUDA:
+```bash
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA')"
+```
+
+Официальный PyTorch installer рекомендует выбирать Windows + Pip + нужную CUDA-версию и проверять `torch.cuda.is_available()` после установки.
+
+## Установка без GPU / CPU-only
+```bash
+python -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
@@ -40,7 +58,7 @@ OPENROUTER_API_KEY=your_key_here
 GROQ_API_KEY=your_key_here
 ```
 
-Остальные настройки лежат в `config.yaml`.
+Остальные настройки лежат в `config.yaml` и редактируются в левой панели интерфейса.
 
 ## Запуск Studio UI + API
 ```bash
@@ -59,14 +77,18 @@ http://127.0.0.1:8000/docs
 
 ## Новый workflow
 1. Создайте проект в сайдбаре.
-2. Укажите YouTube URL.
-3. Нажмите `Analyze / regenerate candidates`.
-4. Дождитесь завершения background job.
-5. Во вкладке Review выберите кандидаты.
-6. Нажмите `Render selected`.
-7. Во вкладке Export скачайте готовые клипы.
+2. В левой панели проверьте CUDA/System и настройки пайплайна.
+3. Укажите YouTube URL.
+4. Нажмите `Analyze / regenerate candidates`.
+5. Дождитесь завершения background job.
+6. Во вкладке Review выберите кандидаты.
+7. Нажмите `Render selected`.
+8. Во вкладке Export скачайте готовые клипы.
 
 ## API endpoints
+- `GET /api/system` — PyTorch/CUDA/GPU status.
+- `GET /api/settings` — текущие настройки пайплайна.
+- `PATCH /api/settings` — сохранить настройки пайплайна.
 - `GET /api/projects` — список проектов.
 - `POST /api/projects` — создать проект.
 - `GET /api/projects/{project_id}` — проект, candidates и transcript count.
