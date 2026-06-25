@@ -18,7 +18,10 @@ DEFAULT_CONFIG = {
     "subtitle_style": "title_only",
     "subtitle_font_size": 70,
     "subtitle_color": "white",
+    "subtitle_active_color": "#FFFF00",
     "subtitle_stroke_color": "black",
+    "subtitle_words_per_caption": 3,
+    "subtitle_timing_offset_ms": -80,
     "ffmpeg_preset": "fast",
     "ffmpeg_crf": 23,
     "use_nvenc": False
