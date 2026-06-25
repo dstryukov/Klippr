@@ -10,7 +10,6 @@ openai
 pydub
 tenacity
 ultralytics
-streamlit
 pyyaml
 python-dotenv
 opencv-python
