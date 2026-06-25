@@ -2,7 +2,7 @@ import os
 import uuid
 import logging
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, HttpUrl
 from typing import List
 
 from core.ingestion import VideoIngestor
@@ -19,8 +19,8 @@ app = FastAPI(
 )
 
 class VideoRequest(BaseModel):
-    url: str
-    num_clips: int = 3
+    url: HttpUrl
+    num_clips: int = Field(default=3, ge=1, le=10)
 
 class ClipResponse(BaseModel):
     title: str
@@ -49,7 +49,7 @@ async def generate_clips(req: VideoRequest):
         # Step 1: Ingestion
         logger.info(f"[{job_id}] STEP 1: Ingestion")
         ingestor = VideoIngestor(temp_dir=temp_dir)
-        video_path = ingestor.download_video(req.url)
+        video_path = ingestor.download_video(str(req.url))
         audio_path = ingestor.extract_audio(video_path)
         transcript = ingestor.transcribe(audio_path)
         
@@ -70,7 +70,7 @@ async def generate_clips(req: VideoRequest):
             clip_filename = f"clip_{i+1}.mp4"
             out_path = os.path.join(out_dir, clip_filename)
             
-            renderer.render_clip(video_path, hl, out_path)
+            renderer.render_clip(video_path, hl, out_path, transcript=transcript)
             
             generated_clips.append(ClipResponse(
                 title=hl.get("title", f"Clip {i+1}"),
@@ -82,5 +82,5 @@ async def generate_clips(req: VideoRequest):
         return ProcessResponse(job_id=job_id, clips=generated_clips)
         
     except Exception as e:
-        logger.error(f"[{job_id}] Job failed: {e}")
+        logger.exception(f"[{job_id}] Job failed")
         raise HTTPException(status_code=500, detail=str(e))

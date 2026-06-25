@@ -14,19 +14,29 @@ class VideoIngestor:
         os.makedirs(self.temp_dir, exist_ok=True)
         
         model_size = settings.WHISPER_MODEL
-        device = settings.DEVICE
+        requested_device = settings.DEVICE
         
-        # Safe fallback if CUDA requested but not available
-        actual_device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
+        # Safe fallback if CUDA requested but not available in PyTorch.
+        actual_device = "cuda" if requested_device == "cuda" and torch.cuda.is_available() else "cpu"
+        if requested_device == "cuda" and actual_device != "cuda":
+            logger.warning("CUDA requested for Whisper, but torch.cuda.is_available() is false. Falling back to CPU.")
         
         if actual_device == "cuda":
-            # GTX 10-series (Pascal) has compute capability 6.1 and doesn't support float16 natively
+            # GTX 10-series (Pascal) has compute capability 6.1 and is more stable with float32.
             major, _ = torch.cuda.get_device_capability()
             compute_type = "float16" if major >= 7 else "float32"
+            device_name = torch.cuda.get_device_name(0)
         else:
             compute_type = "int8"
+            device_name = "CPU"
         
-        logger.info(f"Initializing faster-whisper model ('{model_size}') on {actual_device}...")
+        logger.info(
+            "Initializing faster-whisper model '%s' on %s (%s, compute_type=%s)...",
+            model_size,
+            actual_device,
+            device_name,
+            compute_type,
+        )
         self.whisper_model = WhisperModel(model_size, device=actual_device, compute_type=compute_type)
         logger.info("Whisper model initialized.")
 
@@ -37,6 +47,8 @@ class VideoIngestor:
             'outtmpl': os.path.join(self.temp_dir, '%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
+            # Avoid downloading playlists by accident when a URL contains list=...
+            'noplaylist': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -64,17 +76,35 @@ class VideoIngestor:
             raise RuntimeError(f"Failed to extract audio: {e.stderr.decode()}")
 
     def transcribe(self, audio_path: str) -> list[dict]:
-        logger.info(f"Transcribing audio from {audio_path}...")
-        segments, info = self.whisper_model.transcribe(audio_path, beam_size=5)
+        logger.info(f"Transcribing audio from {audio_path} with word timestamps...")
+        segments, info = self.whisper_model.transcribe(
+            audio_path,
+            beam_size=5,
+            vad_filter=True,
+            word_timestamps=True,
+        )
         
         logger.info(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
         
         transcript = []
         for segment in segments:
+            words = []
+            if segment.words:
+                for word in segment.words:
+                    text = (word.word or "").strip()
+                    if not text:
+                        continue
+                    words.append({
+                        "start": float(word.start),
+                        "end": float(word.end),
+                        "text": text,
+                    })
+
             transcript.append({
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text
+                "start": float(segment.start),
+                "end": float(segment.end),
+                "text": segment.text.strip(),
+                "words": words,
             })
             
         logger.info(f"Transcription complete. Total segments: {len(transcript)}")
