@@ -51,8 +51,21 @@ class VerticalRenderer:
             return f"&H00{b}{g}{r}".upper()
         return default
 
+    def _ass_inline_color(self, value: str, default: str = "&HFFFFFF&") -> str:
+        ass = self._ass_color(value, default="&H00FFFFFF")
+        if ass.startswith("&H00") and len(ass) == 10:
+            return f"&H{ass[4:]}&"
+        return default
+
     def _escape_ass_text(self, text: str) -> str:
-        return str(text or "").replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}").replace("\n", " ").strip()
+        return (
+            str(text or "")
+            .replace("\\", r"\\")
+            .replace("{", "")
+            .replace("}", "")
+            .replace("\n", " ")
+            .strip()
+        )
 
     def _format_time(self, seconds: float) -> str:
         seconds = max(0.0, float(seconds))
@@ -65,6 +78,9 @@ class VerticalRenderer:
             cs = 0
         return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
+    def _subtitle_offset_seconds(self) -> float:
+        return float(getattr(settings, "SUBTITLE_TIMING_OFFSET_MS", -80)) / 1000.0
+
     def _word_events_from_transcript(self, transcript_segments: list[dict], clip_start: float, clip_end: float) -> list[dict]:
         events = []
         for seg in transcript_segments or []:
@@ -74,24 +90,83 @@ class VerticalRenderer:
                     text = self._escape_ass_text(word.get("text", ""))
                     if not text:
                         continue
-                    start = max(float(word.get("start", seg["start"])), clip_start)
-                    end = min(float(word.get("end", start + 0.35)), clip_end)
+                    start = float(word.get("start", seg["start"]))
+                    end = float(word.get("end", start + 0.28))
+                    start = max(start, clip_start)
+                    end = min(end, clip_end)
                     if end <= start:
-                        end = min(start + 0.35, clip_end)
-                    events.append({"start": start - clip_start, "end": end - clip_start, "text": text})
+                        end = min(start + 0.28, clip_end)
+                    events.append({"start_abs": start, "end_abs": end, "text": text})
             else:
-                # Fallback for old transcripts without word timestamps: distribute words across the segment.
                 split_words = [self._escape_ass_text(w) for w in seg.get("text", "").split() if w.strip()]
                 if not split_words:
                     continue
                 seg_start = max(float(seg["start"]), clip_start)
                 seg_end = min(float(seg["end"]), clip_end)
-                step = max(0.25, (seg_end - seg_start) / max(1, len(split_words)))
+                if seg_end <= seg_start:
+                    continue
+                step = max(0.22, (seg_end - seg_start) / max(1, len(split_words)))
                 for idx, text in enumerate(split_words):
                     start = seg_start + idx * step
                     end = min(start + step, clip_end)
-                    events.append({"start": start - clip_start, "end": end - clip_start, "text": text})
-        return [e for e in events if e["end"] > e["start"]]
+                    events.append({"start_abs": start, "end_abs": end, "text": text})
+
+        events = sorted(events, key=lambda e: (e["start_abs"], e["end_abs"]))
+        cleaned = []
+        for event in events:
+            if not cleaned:
+                cleaned.append(event)
+                continue
+            prev = cleaned[-1]
+            if event["start_abs"] < prev["start_abs"]:
+                continue
+            if event["start_abs"] < prev["end_abs"] and event["start_abs"] - prev["start_abs"] > 0.02:
+                prev["end_abs"] = max(prev["start_abs"] + 0.08, event["start_abs"])
+            cleaned.append(event)
+        return cleaned
+
+    def _caption_window(self, words: list[dict], active_idx: int, words_per_caption: int) -> tuple[int, int]:
+        max_words = max(1, min(int(words_per_caption), 5))
+        start = active_idx
+        end = active_idx + 1
+        while start > 0 and end - start < max_words:
+            prev_word = words[start - 1]
+            current_word = words[start]
+            gap = current_word["start_abs"] - prev_word["end_abs"]
+            if gap > 0.65 or prev_word["text"].endswith((".", "!", "?", "…")):
+                break
+            start -= 1
+            break
+        while end < len(words) and end - start < max_words:
+            prev_word = words[end - 1]
+            next_word = words[end]
+            gap = next_word["start_abs"] - prev_word["end_abs"]
+            if gap > 0.65 or prev_word["text"].endswith((".", "!", "?", "…")):
+                break
+            end += 1
+        while end - start < max_words and start > 0:
+            prev_word = words[start - 1]
+            current_word = words[start]
+            gap = current_word["start_abs"] - prev_word["end_abs"]
+            if gap > 0.65 or prev_word["text"].endswith((".", "!", "?", "…")):
+                break
+            start -= 1
+        return start, end
+
+    def _caption_text(self, words: list[dict], start_idx: int, end_idx: int, active_idx: int) -> str:
+        normal_color = self._ass_inline_color(getattr(settings, "SUBTITLE_COLOR", "#FFFFFF"), default="&HFFFFFF&")
+        active_color = self._ass_inline_color(getattr(settings, "SUBTITLE_ACTIVE_COLOR", "#FFFF00"), default="&H00FFFF&")
+        pieces = []
+        for idx in range(start_idx, end_idx):
+            word = words[idx]["text"]
+            if idx == active_idx:
+                pieces.append(
+                    rf"{{\c{active_color}\fscx112\fscy112\bord7}}{word}"
+                    rf"{{\c{normal_color}\fscx100\fscy100\bord5}}"
+                )
+            else:
+                pieces.append(word)
+        return " ".join(pieces)
 
     def _generate_ass_file(
         self,
@@ -104,9 +179,10 @@ class VerticalRenderer:
     ):
         font_size = int(getattr(settings, "SUBTITLE_FONT_SIZE", 70))
         primary = self._ass_color(getattr(settings, "SUBTITLE_COLOR", "#FFFFFF"))
+        active = self._ass_color(getattr(settings, "SUBTITLE_ACTIVE_COLOR", "#FFFF00"), default="&H0000FFFF")
         outline = self._ass_color(getattr(settings, "SUBTITLE_STROKE_COLOR", "#000000"), default="&H00000000")
         title_size = max(font_size, 76)
-        word_margin_v = int(self.resolution[1] * 0.18)
+        word_margin_v = int(self.resolution[1] * 0.16)
         title_margin_v = int(self.resolution[1] * 0.12)
 
         ass_content = f"""[Script Info]
@@ -119,8 +195,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: PopWord,Arial Black,{font_size},{primary},&H0000FFFF,{outline},&H80000000,-1,0,0,0,100,100,0,0,1,5,0,2,40,40,{word_margin_v},1
-Style: Title,Arial Black,{title_size},{primary},&H0000FFFF,{outline},&H80000000,-1,0,0,0,100,100,0,0,1,5,0,5,40,40,{title_margin_v},1
+Style: Caption,Arial Black,{font_size},{primary},{active},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,5,0,2,40,40,{word_margin_v},1
+Style: Title,Arial Black,{title_size},{primary},{active},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,5,0,5,40,40,{title_margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -128,12 +204,34 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if style == "word_by_word":
             word_events = self._word_events_from_transcript(transcript_segments, clip_start, clip_end)
             if word_events:
-                for event in word_events:
-                    # CapCut-like pop: the word appears exactly when spoken, grows slightly, then settles.
-                    text = r"{\fad(35,70)\fscx115\fscy115\t(0,90,\fscx100\fscy100)}" + event["text"]
+                offset = self._subtitle_offset_seconds()
+                words_per_caption = int(getattr(settings, "SUBTITLE_WORDS_PER_CAPTION", 3))
+                clip_duration = max(0.1, clip_end - clip_start)
+                logger.info(
+                    "Generating word-level subtitles: %s words, offset=%sms, words_per_caption=%s",
+                    len(word_events),
+                    int(offset * 1000),
+                    words_per_caption,
+                )
+                for idx, word in enumerate(word_events):
+                    start_idx, end_idx = self._caption_window(word_events, idx, words_per_caption)
+                    event_start = max(0.0, word["start_abs"] - clip_start + offset)
+                    if idx + 1 < len(word_events):
+                        next_start = word_events[idx + 1]["start_abs"] - clip_start + offset
+                        natural_end = word["end_abs"] - clip_start + offset + 0.04
+                        if next_start - event_start <= 0.75:
+                            event_end = next_start
+                        else:
+                            event_end = natural_end
+                    else:
+                        event_end = word["end_abs"] - clip_start + offset + 0.12
+                    event_end = min(clip_duration, max(event_start + 0.10, event_end))
+                    if event_start >= clip_duration:
+                        continue
+                    text = self._caption_text(word_events, start_idx, end_idx, idx)
                     ass_content += (
-                        f"Dialogue: 0,{self._format_time(event['start'])},{self._format_time(event['end'])},"
-                        f"PopWord,,0,0,0,,{text}\n"
+                        f"Dialogue: 0,{self._format_time(event_start)},{self._format_time(event_end)},"
+                        f"Caption,,0,0,0,,{text}\n"
                     )
             else:
                 logger.warning("No word timestamps available for word_by_word subtitles; falling back to title_only.")
@@ -160,7 +258,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     def _smart_crop_params(self, orig_w: int, orig_h: int, center_x: float | None = None) -> tuple[int, int, int, int]:
         target_ar = self.resolution[0] / self.resolution[1]
         source_ar = orig_w / orig_h
-
         if source_ar >= target_ar:
             crop_h = orig_h
             crop_w = min(orig_w, int(round(orig_h * target_ar)))
@@ -186,13 +283,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
-        
         crop_w, crop_h, x1, y1 = self._smart_crop_params(orig_w, orig_h)
         last_center_x = x1 + crop_w / 2.0
         frame_idx = 0
         skip_frames = 3
         out_f = open(output_path, "w", encoding="utf-8")
-        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -226,7 +321,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return crop_w, crop_h, y1
 
     def _ass_filter_path(self, path: str) -> str:
-        # FFmpeg's ass filter is picky on Windows. Forward slashes work better than backslashes.
         return path.replace("\\", "/").replace(":", r"\:")
 
     def _should_use_nvenc(self) -> bool:
@@ -243,11 +337,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             return False
         return True
 
+    def _build_render_command(self, video_path: str, output_path: str, start: float, end: float, vf_chain: str, vcodec: str, preset: str, crf: str, use_nvenc: bool) -> list[str]:
+        duration = max(0.1, end - start)
+        af_chain = f"atrim=start={start}:duration={duration},asetpts=PTS-STARTPTS"
+        command = [FFMPEG_PATH, "-y", "-i", video_path, "-vf", vf_chain, "-af", af_chain, "-c:v", vcodec]
+        if use_nvenc:
+            command += ["-preset", "p4", "-cq", crf]
+        else:
+            command += ["-preset", preset, "-crf", crf]
+        command += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output_path]
+        return command
+
     def render_clip(self, video_path: str, highlight: dict, output_path: str, transcript: list[dict] = None):
         logger.info(f"Starting render for clip: '{highlight.get('title')}'")
         start = float(highlight["start_time"])
         end = float(highlight["end_time"])
-        
+        duration = max(0.1, end - start)
         ass_path = os.path.join(self.output_dir, f"subtitles_{os.path.basename(output_path)}.ass")
         valid_segments = []
         if transcript:
@@ -256,7 +361,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     valid_segments.append(seg)
         self._generate_ass_file(valid_segments, self.subtitle_style, ass_path, highlight.get('title', ''), clip_start=start, clip_end=end)
         ass_path_escaped = self._ass_filter_path(ass_path)
-        
         orig_w, orig_h = self._get_video_dimensions(video_path)
         if self.crop_mode == "face_tracking":
             cmd_path = os.path.join(self.output_dir, f"crop_{os.path.basename(output_path)}.cmd")
@@ -267,60 +371,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             crop_w, crop_h, crop_x, crop_y = self._smart_crop_params(orig_w, orig_h)
             crop_filter = f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
-        
-        vf_chain = f"{crop_filter},scale={self.resolution[0]}:{self.resolution[1]},setsar=1,ass='{ass_path_escaped}'"
+        vf_chain = (
+            f"trim=start={start}:duration={duration},setpts=PTS-STARTPTS,"
+            f"{crop_filter},scale={self.resolution[0]}:{self.resolution[1]},setsar=1,"
+            f"ass='{ass_path_escaped}'"
+        )
         preset = getattr(settings, 'FFMPEG_PRESET', 'fast')
         crf = str(getattr(settings, 'FFMPEG_CRF', 23))
         use_nvenc = self._should_use_nvenc()
         vcodec = "h264_nvenc" if use_nvenc else "libx264"
-        logger.info("Rendering vertical clip at %sx%s using %s", self.resolution[0], self.resolution[1], vcodec)
-        
-        command = [
-            FFMPEG_PATH, "-y",
-            "-ss", str(start),
-            "-to", str(end),
-            "-i", video_path,
-            "-vf", vf_chain,
-            "-c:v", vcodec,
-        ]
-        if use_nvenc:
-            command += ["-preset", "p4", "-cq", crf]
-        else:
-            command += ["-preset", preset, "-crf", crf]
-        command += [
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            output_path,
-        ]
-        
+        logger.info("Rendering vertical clip at %sx%s using %s with frame-accurate trim", self.resolution[0], self.resolution[1], vcodec)
+        command = self._build_render_command(video_path, output_path, start, end, vf_chain, vcodec, preset, crf, use_nvenc)
         logger.info(f"Running FFmpeg: {' '.join(command)}")
         result = subprocess.run(command, capture_output=True, text=True)
-
         if result.returncode != 0 and use_nvenc:
             logger.warning("NVENC render failed, retrying with CPU libx264. Error was:\n%s", result.stderr)
-            command = [
-                FFMPEG_PATH, "-y",
-                "-ss", str(start),
-                "-to", str(end),
-                "-i", video_path,
-                "-vf", vf_chain,
-                "-c:v", "libx264",
-                "-preset", preset,
-                "-crf", crf,
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                output_path,
-            ]
+            command = self._build_render_command(video_path, output_path, start, end, vf_chain, "libx264", preset, crf, False)
             logger.info(f"Running FFmpeg fallback: {' '.join(command)}")
             result = subprocess.run(command, capture_output=True, text=True)
-
         if result.returncode != 0:
             logger.error(f"FFmpeg failed with error:\n{result.stderr}")
             raise RuntimeError(f"FFmpeg render failed: {result.stderr}")
         logger.info(f"Clip successfully rendered to {output_path}")
-        
         try:
             if os.path.exists(ass_path):
                 os.remove(ass_path)
