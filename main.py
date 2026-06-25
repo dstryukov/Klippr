@@ -3,7 +3,11 @@ import os
 from pathlib import Path
 from typing import Any, List
 
-import torch
+try:
+    import torch
+except Exception:  # Keep the API/UI bootable even before PyTorch is installed.
+    torch = None
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
@@ -33,7 +37,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Klippr API",
     description="AI service for cutting long videos into vertical clips",
-    version="0.2.1",
+    version="0.2.2",
 )
 
 
@@ -119,6 +123,22 @@ def current_settings_payload() -> dict[str, Any]:
 
 
 def system_payload() -> dict[str, Any]:
+    if torch is None:
+        configured_device = getattr(settings, "DEVICE", "cpu")
+        return {
+            "torch_installed": False,
+            "torch_version": "not installed",
+            "torch_cuda_version": None,
+            "cuda_available": False,
+            "gpu_count": 0,
+            "gpu_name": "",
+            "current_device": None,
+            "configured_device": configured_device,
+            "effective_device": "cpu",
+            "use_nvenc": bool(getattr(settings, "USE_NVENC", False)),
+            "error": "PyTorch is not installed in this Python environment.",
+        }
+
     cuda_available = False
     gpu_name = ""
     gpu_count = 0
@@ -138,6 +158,7 @@ def system_payload() -> dict[str, Any]:
     configured_device = getattr(settings, "DEVICE", "cpu")
     effective_device = "cuda" if configured_device == "cuda" and cuda_available else "cpu"
     return {
+        "torch_installed": True,
         "torch_version": torch_version,
         "torch_cuda_version": cuda_version,
         "cuda_available": cuda_available,
