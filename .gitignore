@@ -79,7 +79,6 @@ ipython_config.py
 
 # pipenv
 #   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if used with a site-packages/ directory, may be excluded:
 #.venv/
 #pipfile.lock
 
@@ -112,6 +111,7 @@ C:/Users/masteruser/.gemini/antigravity-ide/brain/
 # Klippr output and temp dirs
 tmp/
 output/
+data/projects/
 .streamlit/
 
 # Media & model weights
@@ -120,4 +120,3 @@ output/
 *.m4a
 *.wav
 *.mp3
-
