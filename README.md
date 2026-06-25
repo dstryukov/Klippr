@@ -3,7 +3,7 @@ AI Service for cutting long videos into vertical clips (Reels/Shorts).
 
 ## Требования
 - Python 3.11+
-- [FFmpeg](https://ffmpeg.org/download.html) (Должен быть добавлен в PATH на Windows/Linux/Mac)
+- Встроенный портативный FFmpeg (скачивается автоматически через `imageio-ffmpeg`)
 - Опционально: GPU (Nvidia) для быстрого рендеринга и работы нейросетей локально.
 
 ## Установка

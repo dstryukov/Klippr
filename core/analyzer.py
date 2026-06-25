@@ -138,10 +138,18 @@ class HighlightAnalyzer:
                 start_idx = 0
                 end_idx = len(transcript) - 1
                 
+                min_start_diff = float('inf')
                 for i, seg in enumerate(transcript):
-                    if seg["start"] <= start_sec <= seg["end"]:
+                    diff = abs(seg["start"] - start_sec)
+                    if diff < min_start_diff:
+                        min_start_diff = diff
                         start_idx = i
-                    if seg["start"] <= end_sec <= seg["end"]:
+                        
+                min_end_diff = float('inf')
+                for i, seg in enumerate(transcript):
+                    diff = abs(seg["end"] - end_sec)
+                    if diff < min_end_diff:
+                        min_end_diff = diff
                         end_idx = i
                         
                 while (transcript[end_idx]["end"] - transcript[start_idx]["start"]) < min_clip_len:
@@ -162,10 +170,12 @@ class HighlightAnalyzer:
 
             elif duration > max_clip_len:
                 start_idx = 0
+                min_start_diff = float('inf')
                 for i, seg in enumerate(transcript):
-                    if seg["start"] <= start_sec <= seg["end"]:
+                    diff = abs(seg["start"] - start_sec)
+                    if diff < min_start_diff:
+                        min_start_diff = diff
                         start_idx = i
-                        break
                         
                 end_idx = start_idx
                 while end_idx < len(transcript) - 1:

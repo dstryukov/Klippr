@@ -18,7 +18,13 @@ class VideoIngestor:
         
         # Safe fallback if CUDA requested but not available
         actual_device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if actual_device == "cuda" else "int8"
+        
+        if actual_device == "cuda":
+            # GTX 10-series (Pascal) has compute capability 6.1 and doesn't support float16 natively
+            major, _ = torch.cuda.get_device_capability()
+            compute_type = "float16" if major >= 7 else "float32"
+        else:
+            compute_type = "int8"
         
         logger.info(f"Initializing faster-whisper model ('{model_size}') on {actual_device}...")
         self.whisper_model = WhisperModel(model_size, device=actual_device, compute_type=compute_type)

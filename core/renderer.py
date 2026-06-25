@@ -1,58 +1,14 @@
 import os
+import subprocess
 import logging
-from PIL import Image, ImageDraw, ImageFont
-import textwrap
-import numpy as np
-
-# moviepy imports
-from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip, VideoClip
-import moviepy.video.fx.all as vfx
-
 from config import settings
+import cv2
+
+import imageio_ffmpeg
 
 logger = logging.getLogger(__name__)
 
-class FaceTracker:
-    """Stateful frame processor for tracking faces and smoothing movement using YOLOv8."""
-    def __init__(self, model, orig_size, crop_size):
-        self.model = model
-        self.orig_w, self.orig_h = orig_size
-        self.crop_w, self.crop_h = crop_size
-        self.last_center_x = self.orig_w / 2.0
-        
-    def __call__(self, get_frame, t):
-        frame = get_frame(t)
-        results = self.model(frame, classes=[0], verbose=False)
-        
-        boxes = results[0].boxes
-        if len(boxes) > 0:
-            biggest_area = 0
-            best_center_x = self.last_center_x
-            
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                area = (x2 - x1) * (y2 - y1)
-                if area > biggest_area:
-                    biggest_area = area
-                    best_center_x = (x1 + x2) / 2.0
-            
-            self.last_center_x = 0.8 * self.last_center_x + 0.2 * best_center_x
-            
-        x_center = self.last_center_x
-        
-        x1 = int(x_center - self.crop_w / 2)
-        x2 = int(x_center + self.crop_w / 2)
-        
-        if x1 < 0:
-            x1 = 0
-            x2 = self.crop_w
-        elif x2 > self.orig_w:
-            x2 = self.orig_w
-            x1 = self.orig_w - self.crop_w
-            
-        cropped = frame[:, x1:x2, :]
-        return cropped
-
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 class VerticalRenderer:
     def __init__(self, output_dir: str = "output", resolution: tuple = (1080, 1920)):
@@ -68,214 +24,215 @@ class VerticalRenderer:
                 from ultralytics import YOLO
                 import torch
                 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-                logger.info(f"Loading YOLOv8n on {device}...")
-                self.yolo_model = YOLO('yolov8n.pt')
+                logger.info(f"Loading YOLOv8n-pose on {device}...")
+                self.yolo_model = YOLO('yolov8n-pose.pt')
                 self.yolo_model.to(device)
             except ImportError:
                 logger.error("ultralytics not installed. Falling back to smart_center.")
                 self.crop_mode = "smart_center"
 
-    def _create_title_only_clip(self, text: str, size: tuple, duration: float) -> ImageClip:
-        """Style 1: Centered static title with stroke."""
-        width, height = size
-        img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        
-        font_size = settings.SUBTITLE_FONT_SIZE
-        try:
-            font = ImageFont.truetype("arialbd.ttf", font_size)
-        except IOError:
-            font = ImageFont.load_default()
+    def _generate_ass_file(self, transcript_segments: list, style: str, output_path: str, title: str = ""):
+        ass_content = f"""[Script Info]
+Title: Klippr Subtitles
+ScriptType: v4.00+
+PlayResX: {self.resolution[0]}
+PlayResY: {self.resolution[1]}
+WrapStyle: 0
 
-        # Center Y at 40% of height (Safe zone: 15-80%)
-        y_center = int(height * 0.40)
-        
-        max_chars = max(10, int((width * 0.8) / (font_size * 0.55)))
-        wrapped_text = textwrap.fill(text, width=max_chars)
-        
-        bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        
-        x = (width - text_w) // 2
-        y = y_center - (text_h // 2)
-        
-        stroke = 3
-        stroke_color = settings.SUBTITLE_STROKE_COLOR
-        text_color = settings.SUBTITLE_COLOR
-        
-        # Draw 8-way stroke/shadow
-        for offset_x in [-stroke, 0, stroke]:
-            for offset_y in [-stroke, 0, stroke]:
-                if offset_x == 0 and offset_y == 0: continue
-                draw.multiline_text((x + offset_x, y + offset_y), wrapped_text, font=font, fill=stroke_color, align="center")
-                
-        draw.multiline_text((x, y), wrapped_text, font=font, fill=text_color, align="center")
-        
-        return ImageClip(np.array(img)).set_duration(duration)
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: WordByWord,Arial Black,80,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,0,2,30,30,200,1
+Style: Title,Arial Black,90,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,0,5,30,30,30,1
 
-    def _create_word_by_word_clip(self, text: str, size: tuple, duration: float) -> VideoClip:
-        """Style 2: Opus Clip style word-by-word highlight."""
-        width, height = size
-        font_size = 50 # Slightly smaller for paragraph
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
         
-        words = text.split()
-        if not words:
-            return ImageClip(np.zeros((height, width, 4), dtype=np.uint8)).set_duration(duration)
-            
-        word_duration = duration / len(words)
-        y_center = int(height * 0.70) # Lower third
-        
-        try:
-            font = ImageFont.truetype("arialbd.ttf", font_size)
-        except IOError:
-            font = ImageFont.load_default()
+        def format_time(seconds):
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            cs = int(round((seconds % 1) * 100))
+            return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-        def make_frame(t):
-            img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
+        if style == "word_by_word" and transcript_segments:
+            # We will create one dialogue event that plays through all segments
+            # Calculate the total start and end time of this clip text
+            clip_start = transcript_segments[0]['start']
+            clip_end = transcript_segments[-1]['end']
             
-            current_word_idx = min(int(t / word_duration), len(words) - 1)
+            ass_text = ""
+            for seg in transcript_segments:
+                # duration in centiseconds
+                duration_cs = int(round((seg['end'] - seg['start']) * 100))
+                # Fallback to 1 cs to prevent weird rendering issues
+                duration_cs = max(1, duration_cs)
+                word = seg['text'].strip()
+                ass_text += f"{{\\kf{duration_cs}}}{word} "
             
-            # Wrap text manually to calculate exact word coordinates
-            lines = []
-            current_line = []
-            max_line_width = width * 0.8
+            # Start/End are relative to the extracted clip in FFmpeg, so we should map them from 0
+            # Because we use -ss and -to, FFmpeg restarts video timestamps to 0.
+            event_start = "0:00:00.00"
+            event_end = format_time(clip_end - clip_start + 1.0) # Add a buffer to keep it on screen
             
-            for w in words:
-                current_line.append(w)
-                line_text = " ".join(current_line)
-                bbox = draw.textbbox((0,0), line_text, font=font)
-                w_w = bbox[2] - bbox[0]
-                if w_w > max_line_width and len(current_line) > 1:
-                    current_line.pop()
-                    lines.append(current_line)
-                    current_line = [w]
-            if current_line:
-                lines.append(current_line)
-                
-            total_height = 0
-            line_heights = []
-            for line in lines:
-                bbox = draw.textbbox((0,0), " ".join(line), font=font)
-                lh = bbox[3] - bbox[1]
-                line_heights.append(lh)
-                total_height += lh + 10 # line spacing
-                
-            start_y = y_center - (total_height // 2)
-            word_idx = 0
-            current_y = start_y
+            ass_content += f"Dialogue: 0,{event_start},{event_end},WordByWord,,0,0,0,,{ass_text.strip()}\n"
             
-            stroke = 3
-            stroke_color = settings.SUBTITLE_STROKE_COLOR
-            
-            for i, line in enumerate(lines):
-                line_text = " ".join(line)
-                bbox = draw.textbbox((0,0), line_text, font=font)
-                lw = bbox[2] - bbox[0]
-                current_x = (width - lw) // 2
-                
-                for w in line:
-                    is_active = (word_idx == current_word_idx)
-                    color = "yellow" if is_active else settings.SUBTITLE_COLOR
-                    
-                    # Add stroke
-                    for offset_x in [-stroke, 0, stroke]:
-                        for offset_y in [-stroke, 0, stroke]:
-                            if offset_x == 0 and offset_y == 0: continue
-                            draw.text((current_x + offset_x, current_y + offset_y), w, font=font, fill=stroke_color)
-                            
-                    draw.text((current_x, current_y), w, font=font, fill=color)
-                    
-                    # Move X for next word
-                    w_bbox = draw.textbbox((0,0), w + " ", font=font)
-                    current_x += w_bbox[2] - w_bbox[0]
-                    word_idx += 1
-                    
-                current_y += line_heights[i] + 10
-                
-            return np.array(img)
-            
-        return VideoClip(make_frame, duration=duration)
-
-    def _apply_smart_center_crop(self, clip: VideoFileClip) -> VideoFileClip:
-        orig_w, orig_h = clip.size
-        target_w, target_h = self.resolution
-        target_ratio = target_w / target_h
-        current_ratio = orig_w / orig_h
-        
-        if current_ratio > target_ratio:
-            new_w = int(orig_h * target_ratio)
-            x_center = orig_w / 2
-            y_center = orig_h / 2
-            cropped_clip = vfx.crop(clip, x_center=x_center, y_center=y_center, width=new_w, height=orig_h)
         else:
-            new_h = int(orig_w / target_ratio)
-            x_center = orig_w / 2
-            y_center = orig_h / 2
-            cropped_clip = vfx.crop(clip, x_center=x_center, y_center=y_center, width=orig_w, height=new_h)
-            
-        return cropped_clip
+            # Title only
+            text = title if title else "Крутой момент!"
+            event_start = "0:00:00.00"
+            event_end = "0:59:59.00" # Stay on screen forever
+            ass_content += f"Dialogue: 0,{event_start},{event_end},Title,,0,0,0,,{text}\n"
 
-    def _apply_face_tracking_crop(self, clip: VideoFileClip) -> VideoFileClip:
-        orig_w, orig_h = clip.size
-        target_w, target_h = self.resolution
-        target_ratio = target_w / target_h
-        current_ratio = orig_w / orig_h
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(ass_content)
+
+    def _generate_face_tracking_metadata(self, video_path: str, start: float, end: float, output_path: str):
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        if current_ratio > target_ratio:
-            crop_w = int(orig_h * target_ratio)
-            crop_h = orig_h
-        else:
-            crop_w = orig_w
-            crop_h = int(orig_w / target_ratio)
+        crop_w = int(orig_h * (9 / 16))
+        
+        cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+        
+        out_f = open(output_path, "w")
+        
+        last_center_x = orig_w / 2.0
+        frame_idx = 0
+        skip_frames = 3
+        
+        duration = end - start
+        total_frames = int(duration * fps)
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if current_time > end:
+                break
+                
+            if frame_idx % skip_frames == 0:
+                results = self.yolo_model(frame, classes=[0], verbose=False)
+                boxes = results[0].boxes
+                
+                if len(boxes) > 0:
+                    biggest_area = 0
+                    best_center_x = last_center_x
+                    
+                    for idx, box in enumerate(boxes):
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        area = (x2 - x1) * (y2 - y1)
+                        if area > biggest_area:
+                            biggest_area = area
+                            if hasattr(results[0], 'keypoints') and results[0].keypoints is not None:
+                                kpts = results[0].keypoints.xy[idx].cpu().numpy()
+                                if len(kpts) > 0 and kpts[0][0] > 0:
+                                    best_center_x = float(kpts[0][0])
+                                else:
+                                    best_center_x = (x1 + x2) / 2.0
+                            else:
+                                best_center_x = (x1 + x2) / 2.0
+                    
+                    last_center_x = 0.8 * last_center_x + 0.2 * best_center_x
+            
+            x_center = last_center_x
+            x1 = int(x_center - crop_w / 2)
+            if x1 < 0:
+                x1 = 0
+            elif x1 + crop_w > orig_w:
+                x1 = orig_w - crop_w
+                
+            timestamp_rel = current_time - start
+            out_f.write(f"{timestamp_rel:.3f}-{timestamp_rel+0.5:.3f} crop x {x1}, crop y 0, crop w {crop_w}, crop h {orig_h};\n")
+            
+            frame_idx += 1
+            
+        out_f.close()
+        cap.release()
+        return crop_w, orig_h
 
-        tracker = FaceTracker(self.yolo_model, clip.size, (crop_w, crop_h))
-        tracked_clip = clip.fl(tracker)
-        return tracked_clip
-
-    def render_clip(self, video_path: str, highlight: dict, output_path: str):
+    def render_clip(self, video_path: str, highlight: dict, output_path: str, transcript: list[dict] = None):
         logger.info(f"Starting render for clip: '{highlight.get('title')}'")
+        
+        start = highlight["start_time"]
+        end = highlight["end_time"]
+        
+        # 1. Сгенерировать ASS
+        ass_path = os.path.join(self.output_dir, f"subtitles_{os.path.basename(output_path)}.ass")
+        
+        valid_segments = []
+        if transcript:
+            for seg in transcript:
+                if seg['start'] < end and seg['end'] > start:
+                    valid_segments.append(seg)
+                    
+        self._generate_ass_file(valid_segments, self.subtitle_style, ass_path, highlight.get('title', ''))
+        
+        # 2. Настроить фильтр
+        # For ASS filter in Windows, we must escape backslashes and colons in absolute paths
+        ass_path_escaped = ass_path.replace("\\", "\\\\").replace(":", "\\\\:")
+        
+        if self.crop_mode == "face_tracking":
+            cmd_path = os.path.join(self.output_dir, f"crop_{os.path.basename(output_path)}.cmd")
+            logger.info("Generating face tracking metadata...")
+            crop_w, crop_h = self._generate_face_tracking_metadata(video_path, start, end, cmd_path)
+            
+            cmd_path_escaped = cmd_path.replace("\\", "/")
+            # Use asendcmd/sendcmd syntax
+            crop_filter = f"sendcmd=f='{cmd_path_escaped}',crop"
+        else:
+            # Smart center
+            cap = cv2.VideoCapture(video_path)
+            orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            
+            crop_w = int(orig_h * (9 / 16))
+            crop_filter = f"crop={crop_w}:{orig_h}:(iw-{crop_w})/2:0"
+            
+        vf_chain = f"{crop_filter},scale={self.resolution[0]}:{self.resolution[1]},ass='{ass_path_escaped}'"
+        
+        # 3. Собрать команду FFmpeg
+        # Используем параметры из настроек
+        preset = getattr(settings, 'FFMPEG_PRESET', 'fast')
+        crf = str(getattr(settings, 'FFMPEG_CRF', 23))
+        use_nvenc = getattr(settings, 'USE_NVENC', False)
+        
+        vcodec = "h264_nvenc" if use_nvenc else "libx264"
+        
+        command = [
+            FFMPEG_PATH, "-y",
+            "-i", video_path,
+            "-ss", str(start),
+            "-to", str(end),
+            "-vf", vf_chain,
+            "-c:v", vcodec,
+            "-preset", "p4" if use_nvenc else preset,
+            "-crf" if not use_nvenc else "-cq", crf,
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path
+        ]
+        
+        logger.info(f"Running FFmpeg: {' '.join(command)}")
+        
+        # 4. Выполнить
+        result = subprocess.run(command, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg failed with error:\n{result.stderr}")
+            raise RuntimeError(f"FFmpeg render failed: {result.stderr}")
+            
+        logger.info(f"Clip successfully rendered to {output_path}")
+        
+        # Clean up temp files
         try:
-            clip = VideoFileClip(video_path).subclip(highlight["start_time"], highlight["end_time"])
-            
-            orig_w, orig_h = clip.size
-            logger.info(f"Cropping video from {orig_w}x{orig_h} to {self.resolution[0]}x{self.resolution[1]}, mode: {self.crop_mode}")
-            
-            if self.crop_mode == "face_tracking":
-                cropped_clip = self._apply_face_tracking_crop(clip)
-            else:
-                cropped_clip = self._apply_smart_center_crop(clip)
-                
-            final_visual = cropped_clip.resize(newsize=self.resolution)
-            
-            title_text = highlight.get("title", "Крутой момент!")
-            logger.info(f"Adding subtitles (Style: {self.subtitle_style})")
-            
-            if self.subtitle_style == "word_by_word":
-                txt_clip = self._create_word_by_word_clip(title_text, self.resolution, duration=final_visual.duration)
-            else:
-                txt_clip = self._create_title_only_clip(title_text, self.resolution, duration=final_visual.duration)
-            
-            final_clip = CompositeVideoClip([final_visual, txt_clip])
-            
-            logger.info(f"Writing final video to {output_path} (this might take a minute)...")
-            final_clip.write_videofile(
-                output_path, 
-                codec="libx264", 
-                audio_codec="aac", 
-                temp_audiofile="temp-audio.m4a", 
-                remove_temp=True, 
-                fps=30,
-                threads=4,
-                logger=None
-            )
-            
-            clip.close()
-            txt_clip.close()
-            final_clip.close()
-            logger.info("Render completed successfully.")
-            
-        except Exception as e:
-            logger.error(f"Render failed: {e}")
-            raise
+            if os.path.exists(ass_path): os.remove(ass_path)
+            if self.crop_mode == "face_tracking" and os.path.exists(cmd_path): os.remove(cmd_path)
+        except Exception:
+            pass

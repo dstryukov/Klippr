@@ -79,18 +79,26 @@ with col1:
         index=['openrouter', 'groq'].index(settings.LLM_PROVIDER)
     )
     
-    model_opts = ['google/gemini-2.5-flash-preview-05-20', 'meta-llama/llama-3.3-70b-instruct:free']
-    try:
-        idx = model_opts.index(settings.LLM_MODEL)
-    except ValueError:
-        idx = 0
-        
-    llm_model = st.selectbox("LLM model", model_opts, index=idx)
+    llm_model = st.text_input(
+        "LLM model", 
+        value=settings.LLM_MODEL,
+        help="Examples:\n- OpenRouter: google/gemini-2.5-flash-preview-05-20\n- Groq: llama-3.3-70b-versatile или llama3-70b-8192"
+    )
     
     st.subheader("🎞 Обработка видео")
     device = st.selectbox("Device", ['cpu', 'cuda'], index=['cpu', 'cuda'].index(settings.DEVICE))
+    if device == 'cuda':
+        import torch
+        if not torch.cuda.is_available():
+            st.warning("Устройство 'cuda' выбрано, но GPU недоступен! Приложение переключится на 'cpu'.")
+            
     crop_mode = st.selectbox("Crop mode", ['smart_center', 'face_tracking'], index=['smart_center', 'face_tracking'].index(settings.CROP_MODE))
     output_res = st.selectbox("Output resolution", ['720x1280', '1080x1920'], index=['720x1280', '1080x1920'].index(settings.OUTPUT_RESOLUTION))
+    
+    st.markdown("##### FFmpeg настройки")
+    ffmpeg_preset = st.selectbox("FFmpeg preset", ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow'], index=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow'].index(settings.FFMPEG_PRESET))
+    ffmpeg_crf = st.slider("FFmpeg CRF (качество: меньше - лучше)", min_value=0, max_value=51, value=settings.FFMPEG_CRF)
+    use_nvenc = st.checkbox("Использовать NVENC (NVIDIA GPU)", value=settings.USE_NVENC, help="Значительно ускоряет рендер, если есть видеокарта NVIDIA")
 
 with col2:
     st.subheader("📊 Анализ")
@@ -115,21 +123,23 @@ if st.button("💾 Сохранить настройки", type="primary", use_c
     if min_dur > max_dur:
         st.error("Исправьте ошибки перед сохранением.")
     else:
-        new_settings = {
+        settings.save({
             "whisper_model": whisper_model,
             "llm_provider": llm_provider,
             "llm_model": llm_model,
             "device": device,
             "crop_mode": crop_mode,
             "output_resolution": output_res,
+            "ffmpeg_preset": ffmpeg_preset,
+            "ffmpeg_crf": ffmpeg_crf,
+            "use_nvenc": use_nvenc,
             "num_clips": num_clips,
             "min_clip_duration": min_dur,
             "max_clip_duration": max_dur,
             "subtitle_style": sub_style,
             "subtitle_font_size": sub_font,
             "subtitle_color": sub_color
-        }
-        settings.save(new_settings)
+        })
         st.success("Настройки успешно сохранены!")
 
 st.divider()
@@ -198,7 +208,7 @@ if st.button("▶️ Начать", type="primary", use_container_width=True):
                 progress_bar.progress(prog, text=f"[4/4] Рендер клипа {i+1} из {total_clips}...")
                 
                 clip_path = os.path.join(out_dir, f"clip_{i+1}.mp4")
-                renderer.render_clip(video_path, hl, clip_path)
+                renderer.render_clip(video_path, hl, clip_path, transcript=transcript)
                 final_clips.append(clip_path)
                 update_logs()
                 

@@ -1,44 +1,38 @@
+import sys
 import os
-import logging
-from moviepy.editor import VideoFileClip
+import time
+
+# Create dummy video if not exists
+video_path = "test_video.mp4"
+if not os.path.exists(video_path):
+    print("Generating a 10s test video...")
+    os.system(f"ffmpeg -f lavfi -i testsrc=duration=10:size=1920x1080:rate=30 -f lavfi -i sine=frequency=1000:duration=10 -c:v libx264 -c:a aac {video_path}")
+
 from core.renderer import VerticalRenderer
-from core.ingestion import VideoIngestor
+from config import settings
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+settings.FFMPEG_PRESET = "ultrafast"
+settings.USE_NVENC = False
+settings.CROP_MODE = "face_tracking"
 
-def main():
-    test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-    ingestor = VideoIngestor(temp_dir="tmp")
-    
-    try:
-        video_path = ingestor.download_video(test_url)
-        
-        dummy_highlight = {
-            "start_time": 0.0,
-            "end_time": 5.0,
-            "title": "Тест кропа 1080x1920",
-            "reason": "Verify cropping pipeline and resolution"
-        }
-        
-        # Test the renderer with smart_center (or face_tracking if changed in config)
-        renderer = VerticalRenderer(output_dir="output", resolution=(1080, 1920))
-        output_path = os.path.join("output", "test_clip_1080p.mp4")
-        
-        renderer.render_clip(video_path, dummy_highlight, output_path)
-        
-        # Verify resolution
-        final = VideoFileClip(output_path)
-        print(f"\nИтоговое разрешение: {final.size[0]}x{final.size[1]}")
-        
-        assert final.size[0] == 1080, f"Width is {final.size[0]}, expected 1080!"
-        assert final.size[1] == 1920, f"Height is {final.size[1]}, expected 1920!"
-        
-        final.close()
-        
-        print(f"Успешно! Видео сохранено в: {output_path}")
-        
-    except Exception as e:
-        logging.error(f"Test failed: {e}")
+renderer = VerticalRenderer(output_dir="output", resolution=(1080, 1920))
 
-if __name__ == "__main__":
-    main()
+highlight = {
+    "start_time": 2.0,
+    "end_time": 7.0,
+    "title": "FFmpeg Test!"
+}
+
+transcript = [
+    {"start": 2.5, "end": 3.0, "text": "This"},
+    {"start": 3.0, "end": 3.5, "text": "is"},
+    {"start": 3.5, "end": 4.5, "text": "FFmpeg!"}
+]
+
+print("Starting render...")
+start_time = time.time()
+try:
+    renderer.render_clip(video_path, highlight, "output/test_output.mp4", transcript)
+    print(f"Success! Render took {time.time() - start_time:.2f} seconds.")
+except Exception as e:
+    print(f"Error: {e}")

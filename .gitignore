@@ -113,3 +113,11 @@ C:/Users/masteruser/.gemini/antigravity-ide/brain/
 tmp/
 output/
 .streamlit/
+
+# Media & model weights
+*.pt
+*.mp4
+*.m4a
+*.wav
+*.mp3
+

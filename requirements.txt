@@ -8,10 +8,10 @@ faster-whisper
 pyannote.audio
 openai
 pydub
-moviepy<2.0.0
-Pillow
 tenacity
 ultralytics
 streamlit
 pyyaml
 python-dotenv
+opencv-python
+imageio-ffmpeg

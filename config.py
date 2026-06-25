@@ -18,7 +18,10 @@ DEFAULT_CONFIG = {
     "subtitle_style": "title_only",
     "subtitle_font_size": 70,
     "subtitle_color": "white",
-    "subtitle_stroke_color": "black"
+    "subtitle_stroke_color": "black",
+    "ffmpeg_preset": "fast",
+    "ffmpeg_crf": 23,
+    "use_nvenc": False
 }
 
 class EnvSettings(BaseSettings):
