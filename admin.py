@@ -23,6 +23,8 @@ if "log_stream" not in st.session_state:
     if not any(isinstance(h, logging.StreamHandler) and h.stream == st.session_state.log_stream for h in root_logger.handlers):
         root_logger.addHandler(handler)
 
+logger = logging.getLogger(__name__)
+
 # --- Sidebar ---
 st.sidebar.title("Klippr 🎬")
 gpu_avail = torch.cuda.is_available()
@@ -111,6 +113,33 @@ with col2:
     sub_font = st.slider("Subtitle font size", 30, 100, int(settings.SUBTITLE_FONT_SIZE))
     sub_color = st.color_picker("Subtitle color", settings.SUBTITLE_COLOR if settings.SUBTITLE_COLOR.startswith("#") else "#FFFFFF")
 
+
+def current_ui_config() -> dict:
+    """Return the currently visible UI settings.
+
+    Streamlit widgets update local variables immediately, but the processing
+    pipeline reads from settings/config. Persisting this before a run prevents
+    surprises when the user changes controls and presses Start without pressing Save first.
+    """
+    return {
+        "whisper_model": whisper_model,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "device": device,
+        "crop_mode": crop_mode,
+        "output_resolution": output_res,
+        "ffmpeg_preset": ffmpeg_preset,
+        "ffmpeg_crf": ffmpeg_crf,
+        "use_nvenc": use_nvenc,
+        "num_clips": int(num_clips),
+        "min_clip_duration": int(min_dur),
+        "max_clip_duration": int(max_dur),
+        "subtitle_style": sub_style,
+        "subtitle_font_size": int(sub_font),
+        "subtitle_color": sub_color,
+    }
+
+
 # Validations
 if device == "cuda" and not gpu_avail:
     st.error("⚠️ Устройство 'cuda' выбрано, но GPU недоступен! Приложение переключится на 'cpu'.")
@@ -123,23 +152,7 @@ if st.button("💾 Сохранить настройки", type="primary", use_c
     if min_dur > max_dur:
         st.error("Исправьте ошибки перед сохранением.")
     else:
-        settings.save({
-            "whisper_model": whisper_model,
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
-            "device": device,
-            "crop_mode": crop_mode,
-            "output_resolution": output_res,
-            "ffmpeg_preset": ffmpeg_preset,
-            "ffmpeg_crf": ffmpeg_crf,
-            "use_nvenc": use_nvenc,
-            "num_clips": num_clips,
-            "min_clip_duration": min_dur,
-            "max_clip_duration": max_dur,
-            "subtitle_style": sub_style,
-            "subtitle_font_size": sub_font,
-            "subtitle_color": sub_color
-        })
+        settings.save(current_ui_config())
         st.success("Настройки успешно сохранены!")
 
 st.divider()
@@ -151,7 +164,26 @@ video_url = st.text_input("URL YouTube видео", placeholder="https://www.you
 if st.button("▶️ Начать", type="primary", use_container_width=True):
     if not video_url:
         st.error("Пожалуйста, введите URL видео.")
+    elif min_dur > max_dur:
+        st.error("Исправьте ошибки в настройках перед запуском.")
     else:
+        # Apply the current UI values even if the user did not click Save first.
+        run_config = current_ui_config()
+        settings.save(run_config)
+        logger.info(
+            "Starting run with num_clips=%s, duration=%s-%ss, provider=%s, model=%s, device=%s, crop=%s, subtitles=%s, resolution=%s, nvenc=%s",
+            run_config["num_clips"],
+            run_config["min_clip_duration"],
+            run_config["max_clip_duration"],
+            run_config["llm_provider"],
+            run_config["llm_model"],
+            run_config["device"],
+            run_config["crop_mode"],
+            run_config["subtitle_style"],
+            run_config["output_resolution"],
+            run_config["use_nvenc"],
+        )
+
         # Clear log buffer
         st.session_state.log_stream.truncate(0)
         st.session_state.log_stream.seek(0)
@@ -188,7 +220,7 @@ if st.button("▶️ Начать", type="primary", use_container_width=True):
             # 2. Analysis (40 -> 60%)
             progress_bar.progress(40, text="[3/4] Анализ контента через AI...")
             analyzer = HighlightAnalyzer()
-            highlights = analyzer.find_highlights(transcript)
+            highlights = analyzer.find_highlights(transcript, num_clips=int(num_clips))
             update_logs()
             
             progress_bar.progress(50, text="[3/4] Точная подгонка по тишине...")
@@ -202,9 +234,11 @@ if st.button("▶️ Начать", type="primary", use_container_width=True):
             
             final_clips = []
             total_clips = len(highlights)
+            if total_clips == 0:
+                st.warning("Не удалось найти подходящие хайлайты. Попробуйте уменьшить Min clip duration или выбрать другую LLM-модель.")
             
             for i, hl in enumerate(highlights):
-                prog = 60 + int(40 * (i / total_clips))
+                prog = 60 + int(40 * (i / max(total_clips, 1)))
                 progress_bar.progress(prog, text=f"[4/4] Рендер клипа {i+1} из {total_clips}...")
                 
                 clip_path = os.path.join(out_dir, f"clip_{i+1}.mp4")
