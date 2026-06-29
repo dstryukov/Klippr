@@ -40,6 +40,17 @@ from core.renderer import VerticalRenderer
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+class PollingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args and len(record.args) >= 3:
+            path = str(record.args[2])
+            if path.startswith("/api/projects/") or path.startswith("/api/jobs/"):
+                return False
+        return True
+
+# Suppress uvicorn access logs for polling endpoints
+logging.getLogger("uvicorn.access").addFilter(PollingFilter())
+
 app = FastAPI(
     title="Klippr API",
     description="AI service for cutting long videos into vertical clips",
@@ -59,7 +70,7 @@ class ProjectUpdateRequest(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
-    candidate_count: int = Field(default=12, ge=1, le=30)
+    pass
 
 
 class RenderRequest(BaseModel):
@@ -76,8 +87,6 @@ class SettingsUpdateRequest(BaseModel):
     ffmpeg_preset: str | None = None
     ffmpeg_crf: int | None = None
     use_nvenc: bool | None = None
-    num_clips: int | None = None
-    highlight_candidate_count: int | None = None
     min_clip_duration: int | None = None
     max_clip_duration: int | None = None
     subtitle_style: str | None = None
@@ -92,7 +101,6 @@ class SettingsUpdateRequest(BaseModel):
 
 class VideoRequest(BaseModel):
     url: HttpUrl
-    num_clips: int = Field(default=3, ge=1, le=10)
 
 
 class ClipResponse(BaseModel):
@@ -117,8 +125,6 @@ def current_settings_payload() -> dict[str, Any]:
         "ffmpeg_preset": getattr(settings, "FFMPEG_PRESET", "fast"),
         "ffmpeg_crf": int(getattr(settings, "FFMPEG_CRF", 23)),
         "use_nvenc": bool(getattr(settings, "USE_NVENC", False)),
-        "num_clips": int(getattr(settings, "NUM_CLIPS", 3)),
-        "highlight_candidate_count": int(getattr(settings, "HIGHLIGHT_CANDIDATE_COUNT", 12)),
         "min_clip_duration": int(getattr(settings, "MIN_CLIP_DURATION", 20)),
         "max_clip_duration": int(getattr(settings, "MAX_CLIP_DURATION", 60)),
         "subtitle_style": getattr(settings, "SUBTITLE_STYLE", "word_by_word"),
@@ -192,7 +198,7 @@ def project_payload(project_id: str) -> dict[str, Any]:
     }
 
 
-def _analyze_project_job(job: Any, project_id: str, candidate_count: int) -> dict[str, Any]:
+def _analyze_project_job(job: Any, project_id: str) -> dict[str, Any]:
     job_id = job.id
     job_t0 = time.monotonic()
     project = load_project(project_id)
@@ -289,7 +295,7 @@ def _analyze_project_job(job: Any, project_id: str, candidate_count: int) -> dic
     if job.cancel_requested: raise InterruptedError("Cancelled by user")
     t0 = time.monotonic()
     analyzer = HighlightAnalyzer()
-    candidates = analyzer.find_highlight_candidates(transcript, num_candidates=candidate_count, job=job)
+    candidates = analyzer.find_highlight_candidates(transcript, job=job)
     logger.info("Highlight analysis took %.1fs", time.monotonic() - t0)
 
     job_manager.set_progress(job_id, 85, "Snapping candidates to silence")
@@ -300,12 +306,12 @@ def _analyze_project_job(job: Any, project_id: str, candidate_count: int) -> dic
     # Post-filter: drop any clips that fell below minimum duration after silence snapping
     min_clip = getattr(settings, "MIN_CLIP_DURATION", 30)
     before_count = len(candidates)
-    candidates = [
-        c for c in candidates
-        if float(c.get("end_time", 0)) - float(c.get("start_time", 0)) >= min_clip * 0.7
-    ]
-    if len(candidates) < before_count:
-        logger.info("Dropped %s candidates below minimum duration after silence snapping.", before_count - len(candidates))
+    # candidates = [
+    #     c for c in candidates
+    #     if float(c.get("end_time", 0)) - float(c.get("start_time", 0)) >= min_clip * 0.7
+    # ]
+    # if len(candidates) < before_count:
+    #     logger.info("Dropped %s candidates below minimum duration after silence snapping.", before_count - len(candidates))
 
     job_manager.set_progress(job_id, 90, "Generating hook text")
     t0 = time.monotonic()
@@ -313,7 +319,7 @@ def _analyze_project_job(job: Any, project_id: str, candidate_count: int) -> dic
     logger.info("Hook generation took %.1fs", time.monotonic() - t0)
 
     project["candidates_path"] = save_candidates(project_id, candidates)
-    project["selected_candidate_ids"] = [c.get("id") for c in candidates[: int(getattr(settings, "NUM_CLIPS", 3))] if c.get("id")]
+    project["selected_candidate_ids"] = [c.get("id") for c in candidates if c.get("id")]
     project["status"] = "candidates_ready"
     save_project(project)
 
@@ -501,7 +507,7 @@ async def api_analyze_project(project_id: str, req: AnalyzeRequest):
     job = job_manager.submit(
         kind="analyze",
         project_id=project_id,
-        fn=lambda j: _analyze_project_job(j, project_id, req.candidate_count),
+        fn=lambda j: _analyze_project_job(j, project_id),
     )
     return job.to_dict()
 
@@ -565,7 +571,7 @@ async def generate_clips(req: VideoRequest):
     job = job_manager.submit(
         kind="analyze",
         project_id=project["id"],
-        fn=lambda j: _analyze_project_job(j, project["id"], max(req.num_clips * 4, 10)),
+        fn=lambda j: _analyze_project_job(j, project["id"]),
     )
     return {
         "project_id": project["id"],
@@ -573,3 +579,5 @@ async def generate_clips(req: VideoRequest):
         "status_url": f"/api/jobs/{job.id}",
         "project_url": f"/api/projects/{project['id']}",
     }
+
+# touch

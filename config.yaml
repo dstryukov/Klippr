@@ -6,18 +6,16 @@ face_tracking_max_shift: 40
 face_tracking_skip_frames: 5
 ffmpeg_crf: 23
 ffmpeg_preset: fast
-highlight_candidate_count: 6
 hook_overlay_bg_color: '#000000'
 hook_overlay_color: '#FFFFFF'
 hook_overlay_duration: 4
 hook_overlay_enabled: true
 hook_overlay_font_size: 80
 hook_overlay_position: top
-llm_model: accounts/fireworks/models/deepseek-v4-pro
+llm_model: accounts/fireworks/models/deepseek-v4-flash
 llm_provider: fireworks
 max_clip_duration: 180
 min_clip_duration: 30
-num_clips: 6
 output_resolution: 1080x1920
 subtitle_active_color: '#ffff00'
 subtitle_color: '#13e150'
@@ -27,4 +25,4 @@ subtitle_style: word_by_word
 subtitle_timing_offset_ms: -80
 subtitle_words_per_caption: 3
 use_nvenc: true
-whisper_model: base
+whisper_model: small

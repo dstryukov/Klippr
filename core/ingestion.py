@@ -110,7 +110,7 @@ class VideoIngestor:
         t0 = time.monotonic()
         segments, info = self.whisper_model.transcribe(
             audio_path,
-            beam_size=5,
+            beam_size=2,  # Reduced from 5 to 2 for 2-3x speedup with almost no accuracy loss
             vad_filter=True,
             word_timestamps=True,
         )
@@ -125,18 +125,40 @@ class VideoIngestor:
                 raise InterruptedError("Transcription cancelled by user")
             segment_count += 1
             now = time.monotonic()
-            if now - last_log_time >= 15:
+            if now - last_log_time >= 2:
                 elapsed = now - t0
-                logger.info(
-                    "Transcribing... %d segments so far (%.0fs elapsed, current position: %.1fs)",
-                    segment_count, elapsed, segment.end,
-                )
+                dur = getattr(info, "duration", 0)
+                if dur > 0:
+                    perc = int((segment.end / dur) * 100)
+                    msg = f"Transcribing... {int(segment.end)}s / {int(dur)}s ({perc}%)"
+                else:
+                    msg = f"Transcribing... {int(segment.end)}s processed"
+                    
+                if now - getattr(self, "_last_console_log", 0) >= 15:
+                    logger.info(msg + f" [{int(elapsed)}s elapsed]")
+                    self._last_console_log = now
+                    
+                if job:
+                    job.stage = msg
+                    
                 last_log_time = now
+
+            words_data = []
+            if hasattr(segment, "words") and segment.words:
+                words_data = [
+                    {
+                        "word": w.word.strip(),
+                        "start": float(w.start),
+                        "end": float(w.end)
+                    }
+                    for w in segment.words
+                ]
 
             transcript.append({
                 "start": float(segment.start),
                 "end": float(segment.end),
                 "text": segment.text.strip(),
+                "words": words_data,
             })
             
         logger.info("Transcription complete in %.1fs. Total segments: %d", time.monotonic() - t0, len(transcript))
@@ -168,17 +190,17 @@ class VideoIngestor:
             if getattr(settings, "HF_TOKEN", None):
                 hf_token = settings.HF_TOKEN.get_secret_value()
 
-            # Newer pyannote (>=3.2) uses `token=`, older uses `use_auth_token=`
-            try:
-                pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    token=hf_token,
-                )
-            except TypeError:
-                pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    use_auth_token=hf_token,
-                )
+            # Authenticate via huggingface_hub to avoid use_auth_token deprecation issues
+            if hf_token:
+                try:
+                    import huggingface_hub
+                    huggingface_hub.login(token=hf_token)
+                except ImportError:
+                    pass
+
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1"
+            )
             pipeline.to(device)
 
             diarization = pipeline(audio_path)

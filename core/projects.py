@@ -223,9 +223,10 @@ def load_candidates(project_id: str) -> list[dict[str, Any]]:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         candidates = normalize_candidates(data if isinstance(data, list) else [])
-        # Auto-heal old candidate files that did not have ids.
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(candidates, f, ensure_ascii=False, indent=2)
+        # Only rewrite if auto-healing actually changed something
+        if data != candidates:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(candidates, f, ensure_ascii=False, indent=2)
         return candidates
     except Exception:
         return []

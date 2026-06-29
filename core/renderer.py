@@ -88,7 +88,7 @@ class VerticalRenderer:
             words = seg.get("words") or []
             if words:
                 for word in words:
-                    text = self._escape_ass_text(word.get("text", ""))
+                    text = self._escape_ass_text(word.get("word") or word.get("text", ""))
                     if not text:
                         continue
                     start = float(word.get("start", seg["start"]))

@@ -57,11 +57,13 @@ class JobManager:
             result = fn(job) or {}
             self.update(job_id, status="completed", progress=100, stage="Completed", result=result)
         except Exception as e:
+            logger.error(f"Job {job_id} failed", exc_info=True)
             self.update(
                 job_id,
                 status="failed",
-                error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
-                stage="Failed",
+                stage=f"Error: {e.__class__.__name__}: {str(e)}",
+                error=str(e),
+                progress=0,
             )
 
     def update(self, job_id: str, **updates: Any) -> Job | None:

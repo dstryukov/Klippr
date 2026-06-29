@@ -14,8 +14,6 @@ DEFAULT_CONFIG = {
     "device": "cuda",
     "crop_mode": "smart_center",
     "output_resolution": "1080x1920",
-    "num_clips": 3,
-    "highlight_candidate_count": 12,
     "min_clip_duration": 30,
     "max_clip_duration": 90,
     "subtitle_style": "title_only",

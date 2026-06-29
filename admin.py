@@ -193,14 +193,6 @@ def read_settings_from_sidebar() -> dict:
         )
         ffmpeg_crf = st.slider("FFmpeg CRF", 0, 51, safe_int(getattr(settings, "FFMPEG_CRF", 23), 23), key="settings_ffmpeg_crf")
         use_nvenc = st.checkbox("Use NVENC", value=bool(getattr(settings, "USE_NVENC", False)), key="settings_use_nvenc")
-        num_clips = st.slider("Default clips", 1, 10, safe_int(getattr(settings, "NUM_CLIPS", 3), 3), key="settings_num_clips")
-        candidate_count = st.slider(
-            "Candidates to preview",
-            4,
-            20,
-            safe_int(getattr(settings, "HIGHLIGHT_CANDIDATE_COUNT", 12), 12),
-            key="settings_candidate_count",
-        )
         min_dur = st.number_input("Min clip duration", value=safe_int(getattr(settings, "MIN_CLIP_DURATION", 20), 20), key="settings_min_dur")
         max_dur = st.number_input("Max clip duration", value=safe_int(getattr(settings, "MAX_CLIP_DURATION", 60), 60), key="settings_max_dur")
         sub_style = st.selectbox(
@@ -240,8 +232,6 @@ def read_settings_from_sidebar() -> dict:
             "ffmpeg_preset": ffmpeg_preset,
             "ffmpeg_crf": int(ffmpeg_crf),
             "use_nvenc": bool(use_nvenc),
-            "num_clips": int(num_clips),
-            "highlight_candidate_count": int(candidate_count),
             "min_clip_duration": int(min_dur),
             "max_clip_duration": int(max_dur),
             "subtitle_style": sub_style,
@@ -415,10 +405,10 @@ with analyze_tab:
 
                 progress_bar.progress(65, text="Finding AI candidates...")
                 analyzer = HighlightAnalyzer()
-                candidates = analyzer.find_highlight_candidates(transcript, num_candidates=run_config["highlight_candidate_count"])
+                candidates = analyzer.find_highlight_candidates(transcript)
                 candidates = analyzer.snap_to_silence(candidates, audio_path, transcript)
                 project["candidates_path"] = save_candidates(project["id"], candidates)
-                project["selected_candidate_ids"] = [c.get("id") for c in candidates[: run_config["num_clips"]] if c.get("id")]
+                project["selected_candidate_ids"] = [c.get("id") for c in candidates if c.get("id")]
                 project["status"] = "candidates_ready"
                 save_project(project)
                 update_logs()
@@ -468,7 +458,7 @@ with review_tab:
         candidate_ids = [str(c.get("id", f"candidate_{i + 1}")) for i, c in enumerate(candidates)]
         project_selected = [str(cid) for cid in project.get("selected_candidate_ids", []) if str(cid) in candidate_ids]
         if not project_selected:
-            project_selected = candidate_ids[: run_config["num_clips"]]
+            project_selected = candidate_ids
 
         selected_ids = st.multiselect(
             "Selected candidates",
