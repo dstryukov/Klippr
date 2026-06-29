@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, List
 
@@ -12,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
 
-from config import settings
+from config import settings, SUPPORTED_LLM_PROVIDERS
 from core.analyzer import HighlightAnalyzer
 from core.ingestion import VideoIngestor
 from core.jobs import job_manager
@@ -20,11 +21,16 @@ from core.projects import (
     add_clip,
     clips_dir,
     create_project,
+    delete_candidate,
+    delete_project,
     list_projects,
     load_candidates,
+    load_diarization,
     load_project,
     load_transcript,
+    remove_clip,
     save_candidates,
+    save_diarization,
     save_project,
     save_transcript,
     tmp_dir,
@@ -80,6 +86,8 @@ class SettingsUpdateRequest(BaseModel):
     subtitle_active_color: str | None = None
     subtitle_words_per_caption: int | None = None
     subtitle_timing_offset_ms: int | None = None
+    hook_overlay_enabled: bool | None = None
+    hook_overlay_duration: int | None = None
 
 
 class VideoRequest(BaseModel):
@@ -119,6 +127,8 @@ def current_settings_payload() -> dict[str, Any]:
         "subtitle_active_color": getattr(settings, "SUBTITLE_ACTIVE_COLOR", "#FFFF00"),
         "subtitle_words_per_caption": int(getattr(settings, "SUBTITLE_WORDS_PER_CAPTION", 3)),
         "subtitle_timing_offset_ms": int(getattr(settings, "SUBTITLE_TIMING_OFFSET_MS", -80)),
+        "hook_overlay_enabled": bool(getattr(settings, "HOOK_OVERLAY_ENABLED", True)),
+        "hook_overlay_duration": int(getattr(settings, "HOOK_OVERLAY_DURATION", 4)),
     }
 
 
@@ -169,6 +179,7 @@ def system_payload() -> dict[str, Any]:
         "effective_device": effective_device,
         "use_nvenc": bool(getattr(settings, "USE_NVENC", False)),
         "error": error,
+        "available_llm_providers": SUPPORTED_LLM_PROVIDERS,
     }
 
 
@@ -181,7 +192,9 @@ def project_payload(project_id: str) -> dict[str, Any]:
     }
 
 
-def _analyze_project_job(job_id: str, project_id: str, candidate_count: int) -> dict[str, Any]:
+def _analyze_project_job(job: Any, project_id: str, candidate_count: int) -> dict[str, Any]:
+    job_id = job.id
+    job_t0 = time.monotonic()
     project = load_project(project_id)
     if not project.get("source_url"):
         raise ValueError("Project source_url is empty")
@@ -190,39 +203,126 @@ def _analyze_project_job(job_id: str, project_id: str, candidate_count: int) -> 
     project["settings_snapshot"] = current_settings_payload()
     save_project(project)
 
-    job_manager.set_progress(job_id, 5, "Initializing downloader")
-    ingestor = VideoIngestor(temp_dir=str(tmp_dir(project_id)))
+    # ── Check for cached video / transcript ──────────────────────────
+    existing_transcript = load_transcript(project_id)
+    video_path = project.get("video_path", "")
+    has_video = bool(video_path) and Path(video_path).exists()
 
-    job_manager.set_progress(job_id, 15, "Downloading video")
-    video_path = ingestor.download_video(project["source_url"])
-    project["video_path"] = video_path
-    save_project(project)
+    # Try to locate video in project tmp dir if path is missing
+    if not has_video:
+        tmp = tmp_dir(project_id)
+        if tmp.exists():
+            for fname in os.listdir(tmp):
+                if fname.endswith((".mp4", ".mkv", ".webm")):
+                    fpath = tmp / fname
+                    if fpath.stat().st_size > 0:
+                        video_path = str(fpath)
+                        has_video = True
+                        project["video_path"] = video_path
+                        save_project(project)
+                        break
 
-    job_manager.set_progress(job_id, 30, "Extracting audio")
-    audio_path = ingestor.extract_audio(video_path)
-    project["audio_path"] = audio_path
-    save_project(project)
+    if has_video and existing_transcript:
+        # ── Fast path: skip to analysis ───────────────────────────────
+        logger.info(
+            "Found cached video (%s) and transcript (%d segments). Skipping download/transcription.",
+            video_path, len(existing_transcript),
+        )
+        transcript = existing_transcript
+        audio_path = project.get("audio_path", "")
 
-    job_manager.set_progress(job_id, 45, "Transcribing audio with word timestamps")
-    transcript = ingestor.transcribe(audio_path)
-    project["transcript_path"] = save_transcript(project_id, transcript)
-    save_project(project)
+        # Locate audio file if path is stale
+        if not audio_path or not Path(audio_path).exists():
+            tmp = tmp_dir(project_id)
+            if tmp.exists():
+                for fname in os.listdir(tmp):
+                    if fname.endswith(".wav"):
+                        apath = tmp / fname
+                        if apath.stat().st_size > 0:
+                            audio_path = str(apath)
+                            project["audio_path"] = audio_path
+                            save_project(project)
+                            break
 
-    job_manager.set_progress(job_id, 70, "Finding AI highlight candidates")
+        # Load existing diarization (or empty list)
+        diarization = load_diarization(project_id)
+        if diarization:
+            logger.info("Found cached diarization (%d segments).", len(diarization))
+
+        job_manager.set_progress(job_id, 55, "Using cached video and transcript")
+    else:
+        # ── Full pipeline: download → extract → transcribe → diarize ───
+        if job.cancel_requested: raise InterruptedError("Cancelled by user")
+        job_manager.set_progress(job_id, 5, "Initializing downloader")
+        ingestor = VideoIngestor(temp_dir=str(tmp_dir(project_id)))
+
+        job_manager.set_progress(job_id, 15, "Downloading video")
+        t0 = time.monotonic()
+        video_path = ingestor.download_video(project["source_url"])
+        logger.info("Download took %.1fs", time.monotonic() - t0)
+        project["video_path"] = video_path
+        save_project(project)
+
+        job_manager.set_progress(job_id, 30, "Extracting audio")
+        t0 = time.monotonic()
+        audio_path = ingestor.extract_audio(video_path)
+        logger.info("Audio extraction took %.1fs", time.monotonic() - t0)
+        project["audio_path"] = audio_path
+        save_project(project)
+
+        job_manager.set_progress(job_id, 45, "Transcribing audio with word timestamps")
+        if job.cancel_requested: raise InterruptedError("Cancelled by user")
+        t0 = time.monotonic()
+        transcript = ingestor.transcribe(audio_path, job=job)
+        logger.info("Transcription took %.1fs", time.monotonic() - t0)
+        project["transcript_path"] = save_transcript(project_id, transcript)
+        save_project(project)
+
+        job_manager.set_progress(job_id, 55, "Diarizing speakers")
+        t0 = time.monotonic()
+        diarization = ingestor.diarize(audio_path)
+        logger.info("Diarization took %.1fs", time.monotonic() - t0)
+        project["diarization_path"] = save_diarization(project_id, diarization)
+        save_project(project)
+
+    job_manager.set_progress(job_id, 65, "Finding AI highlight candidates")
+    if job.cancel_requested: raise InterruptedError("Cancelled by user")
+    t0 = time.monotonic()
     analyzer = HighlightAnalyzer()
-    candidates = analyzer.find_highlight_candidates(transcript, num_candidates=candidate_count)
+    candidates = analyzer.find_highlight_candidates(transcript, num_candidates=candidate_count, job=job)
+    logger.info("Highlight analysis took %.1fs", time.monotonic() - t0)
 
     job_manager.set_progress(job_id, 85, "Snapping candidates to silence")
-    candidates = analyzer.snap_to_silence(candidates, audio_path, transcript)
+    t0 = time.monotonic()
+    candidates = analyzer.snap_to_silence(candidates, audio_path, transcript, diarization=diarization)
+    logger.info("Silence snapping took %.1fs", time.monotonic() - t0)
+
+    # Post-filter: drop any clips that fell below minimum duration after silence snapping
+    min_clip = getattr(settings, "MIN_CLIP_DURATION", 30)
+    before_count = len(candidates)
+    candidates = [
+        c for c in candidates
+        if float(c.get("end_time", 0)) - float(c.get("start_time", 0)) >= min_clip * 0.7
+    ]
+    if len(candidates) < before_count:
+        logger.info("Dropped %s candidates below minimum duration after silence snapping.", before_count - len(candidates))
+
+    job_manager.set_progress(job_id, 90, "Generating hook text")
+    t0 = time.monotonic()
+    candidates = analyzer.generate_hooks(candidates, transcript)
+    logger.info("Hook generation took %.1fs", time.monotonic() - t0)
+
     project["candidates_path"] = save_candidates(project_id, candidates)
     project["selected_candidate_ids"] = [c.get("id") for c in candidates[: int(getattr(settings, "NUM_CLIPS", 3))] if c.get("id")]
     project["status"] = "candidates_ready"
     save_project(project)
 
+    logger.info("Full analysis completed in %.1fs", time.monotonic() - job_t0)
     return {"candidate_count": len(candidates), "project_id": project_id}
 
 
 def _render_project_job(job_id: str, project_id: str, candidate_ids: list[str]) -> dict[str, Any]:
+    job_t0 = time.monotonic()
     project = load_project(project_id)
     candidates = load_candidates(project_id)
     transcript = load_transcript(project_id)
@@ -245,14 +345,17 @@ def _render_project_job(job_id: str, project_id: str, candidate_ids: list[str]) 
 
     selected_sorted = sorted(selected, key=lambda c: float(c.get("start_time", 0)))
     for i, highlight in enumerate(selected_sorted):
+        t0 = time.monotonic()
         progress = 5 + int(90 * (i / max(len(selected_sorted), 1)))
         job_manager.set_progress(job_id, progress, f"Rendering clip {i + 1}/{len(selected_sorted)}")
         clip_path = str(clips_dir(project_id) / f"clip_{i + 1:02d}.mp4")
         renderer.render_clip(project["video_path"], highlight, clip_path, transcript=transcript)
+        logger.info("Clip %d/%d rendered in %.1fs", i + 1, len(selected_sorted), time.monotonic() - t0)
         project = add_clip(project, clip_path, highlight)
 
     project["status"] = "rendered"
     save_project(project)
+    logger.info("Full render completed in %.1fs", time.monotonic() - job_t0)
     return {"clip_count": len(project.get("clips", [])), "project_id": project_id}
 
 
@@ -343,6 +446,42 @@ async def api_update_project(project_id: str, req: ProjectUpdateRequest):
     return project_payload(project_id)
 
 
+@app.delete("/api/projects/{project_id}")
+async def api_delete_project(project_id: str):
+    try:
+        delete_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Project not found")
+    # Clear active project if it was the deleted one
+    return {"status": "deleted", "project_id": project_id}
+
+
+@app.delete("/api/projects/{project_id}/candidates/{candidate_id}")
+async def api_delete_candidate(project_id: str, candidate_id: str):
+    try:
+        load_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        remaining = delete_candidate(project_id, candidate_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"status": "deleted", "candidate_id": candidate_id, "remaining": len(remaining)}
+
+
+@app.delete("/api/projects/{project_id}/clips/{clip_index}")
+async def api_delete_clip(project_id: str, clip_index: int):
+    try:
+        load_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        project = remove_clip(project_id, clip_index)
+    except IndexError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"status": "deleted", "clip_index": clip_index, "remaining_clips": len(project.get("clips", []))}
+
+
 @app.get("/api/projects/{project_id}/candidates")
 async def api_get_candidates(project_id: str):
     try:
@@ -362,7 +501,7 @@ async def api_analyze_project(project_id: str, req: AnalyzeRequest):
     job = job_manager.submit(
         kind="analyze",
         project_id=project_id,
-        fn=lambda j: _analyze_project_job(j.id, project_id, req.candidate_count),
+        fn=lambda j: _analyze_project_job(j, project_id, req.candidate_count),
     )
     return job.to_dict()
 
@@ -397,6 +536,14 @@ async def api_get_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_dict()
 
+@app.post("/api/jobs/{job_id}/cancel")
+async def api_cancel_job(job_id: str):
+    job = job_manager.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job_manager.cancel(job_id)
+    return {"status": "ok", "message": "Cancellation requested"}
+
 
 @app.get("/api/projects/{project_id}/clips/{filename}")
 async def api_get_clip(project_id: str, filename: str):
@@ -418,7 +565,7 @@ async def generate_clips(req: VideoRequest):
     job = job_manager.submit(
         kind="analyze",
         project_id=project["id"],
-        fn=lambda j: _analyze_project_job(j.id, project["id"], max(req.num_clips * 4, 10)),
+        fn=lambda j: _analyze_project_job(j, project["id"], max(req.num_clips * 4, 10)),
     )
     return {
         "project_id": project["id"],

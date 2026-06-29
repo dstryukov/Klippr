@@ -6,6 +6,7 @@ yt-dlp
 ffmpeg-python
 faster-whisper
 pyannote.audio
+torchaudio
 openai
 pydub
 tenacity

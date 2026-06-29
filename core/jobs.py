@@ -21,6 +21,7 @@ class Job:
     stage: str = "Queued"
     error: str = ""
     result: dict[str, Any] = field(default_factory=dict)
+    cancel_requested: bool = False
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
 
@@ -80,6 +81,11 @@ class JobManager:
     def get(self, job_id: str) -> Job | None:
         with self.lock:
             return self.jobs.get(job_id)
+
+    def cancel(self, job_id: str) -> None:
+        job = self.get(job_id)
+        if job:
+            job.cancel_requested = True
 
     def list(self) -> list[Job]:
         with self.lock:

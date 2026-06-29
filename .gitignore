@@ -120,3 +120,4 @@ data/projects/
 *.m4a
 *.wav
 *.mp3
+.opencode

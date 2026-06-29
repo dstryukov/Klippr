@@ -1,10 +1,12 @@
 import os
 import logging
+import time
 import yt_dlp
 import ffmpeg
 from faster_whisper import WhisperModel
 import torch
 from config import settings
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +39,33 @@ class VideoIngestor:
             device_name,
             compute_type,
         )
+        t0 = time.monotonic()
         self.whisper_model = WhisperModel(model_size, device=actual_device, compute_type=compute_type)
-        logger.info("Whisper model initialized.")
+        logger.info("Whisper model initialized in %.1fs.", time.monotonic() - t0)
+
+    @staticmethod
+    def _validate_url(url: str) -> None:
+        """Basic sanity check before handing the URL to yt-dlp."""
+        if not url or not url.strip():
+            raise ValueError("Video URL is empty")
+        blocked = ["playlist", "channel", "/c/", "/@"]
+        lower = url.lower()
+        for pattern in blocked:
+            if pattern in lower and "watch" not in lower and "shorts" not in lower:
+                raise ValueError(f"URL looks like a playlist/channel link, not a single video: {url}")
 
     def download_video(self, url: str) -> str:
+        self._validate_url(url)
         logger.info(f"Downloading video from {url}...")
+
+        # Reuse an already-downloaded file in the temp directory.
+        for fname in os.listdir(self.temp_dir):
+            if fname.endswith((".mp4", ".mkv", ".webm")):
+                existing = os.path.join(self.temp_dir, fname)
+                if os.path.getsize(existing) > 0:
+                    logger.info("Video already downloaded, reusing: %s", existing)
+                    return existing
+
         ydl_opts = {
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': os.path.join(self.temp_dir, '%(id)s.%(ext)s'),
@@ -50,18 +74,24 @@ class VideoIngestor:
             # Avoid downloading playlists by accident when a URL contains list=...
             'noplaylist': True,
         }
+        t0 = time.monotonic()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             video_path = ydl.prepare_filename(info)
-            logger.info(f"Video downloaded successfully: {video_path}")
+            logger.info("Video downloaded in %.1fs: %s", time.monotonic() - t0, video_path)
             return video_path
 
     def extract_audio(self, video_path: str) -> str:
         logger.info(f"Extracting audio from {video_path}...")
         base_name = os.path.splitext(os.path.basename(video_path))[0]
         audio_path = os.path.join(self.temp_dir, f"{base_name}.wav")
-        
+
+        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+            logger.info("Audio already extracted, reusing: %s", audio_path)
+            return audio_path
+
         try:
+            t0 = time.monotonic()
             (
                 ffmpeg
                 .input(video_path)
@@ -69,14 +99,15 @@ class VideoIngestor:
                 .overwrite_output()
                 .run(capture_stdout=True, capture_stderr=True)
             )
-            logger.info(f"Audio extracted successfully: {audio_path}")
+            logger.info("Audio extracted in %.1fs: %s", time.monotonic() - t0, audio_path)
             return audio_path
         except ffmpeg.Error as e:
             logger.error(f"FFmpeg error: {e.stderr.decode()}")
             raise RuntimeError(f"Failed to extract audio: {e.stderr.decode()}")
 
-    def transcribe(self, audio_path: str) -> list[dict]:
-        logger.info(f"Transcribing audio from {audio_path} with word timestamps...")
+    def transcribe(self, audio_path: str, job: Any = None) -> list[dict]:
+        logger.info(f"Transcribing audio from {audio_path}...")
+        t0 = time.monotonic()
         segments, info = self.whisper_model.transcribe(
             audio_path,
             beam_size=5,
@@ -87,25 +118,81 @@ class VideoIngestor:
         logger.info(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
         
         transcript = []
+        segment_count = 0
+        last_log_time = time.monotonic()
         for segment in segments:
-            words = []
-            if segment.words:
-                for word in segment.words:
-                    text = (word.word or "").strip()
-                    if not text:
-                        continue
-                    words.append({
-                        "start": float(word.start),
-                        "end": float(word.end),
-                        "text": text,
-                    })
+            if job and getattr(job, "cancel_requested", False):
+                raise InterruptedError("Transcription cancelled by user")
+            segment_count += 1
+            now = time.monotonic()
+            if now - last_log_time >= 15:
+                elapsed = now - t0
+                logger.info(
+                    "Transcribing... %d segments so far (%.0fs elapsed, current position: %.1fs)",
+                    segment_count, elapsed, segment.end,
+                )
+                last_log_time = now
 
             transcript.append({
                 "start": float(segment.start),
                 "end": float(segment.end),
                 "text": segment.text.strip(),
-                "words": words,
             })
             
-        logger.info(f"Transcription complete. Total segments: {len(transcript)}")
+        logger.info("Transcription complete in %.1fs. Total segments: %d", time.monotonic() - t0, len(transcript))
         return transcript
+
+    def diarize(self, audio_path: str) -> list[dict]:
+        """Run speaker diarization using pyannote.audio.
+
+        Returns a list of segments: [{"start": float, "end": float, "speaker": str}, ...]
+        Falls back to an empty list if pyannote.audio is not installed or fails.
+        """
+        if not getattr(settings, "ENABLE_DIARIZATION", True):
+            logger.info("Diarization is disabled in config, skipping.")
+            return []
+
+        try:
+            from pyannote.audio import Pipeline
+        except ImportError:
+            logger.warning("pyannote.audio is not installed. Skipping diarization.")
+            return []
+
+        logger.info("Running speaker diarization on %s...", audio_path)
+        t0 = time.monotonic()
+        try:
+            requested_device = getattr(settings, "DEVICE", "cpu")
+            device = "cuda" if requested_device == "cuda" and torch.cuda.is_available() else "cpu"
+
+            hf_token = None
+            if getattr(settings, "HF_TOKEN", None):
+                hf_token = settings.HF_TOKEN.get_secret_value()
+
+            # Newer pyannote (>=3.2) uses `token=`, older uses `use_auth_token=`
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    token=hf_token,
+                )
+            except TypeError:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=hf_token,
+                )
+            pipeline.to(device)
+
+            diarization = pipeline(audio_path)
+            segments: list[dict] = []
+            for turn, _, speaker in diarization.itertracks(yield_label=True):
+                segments.append({
+                    "start": round(turn.start, 2),
+                    "end": round(turn.end, 2),
+                    "speaker": speaker,
+                })
+
+            logger.info("Diarization complete in %.1fs. Total segments: %d", time.monotonic() - t0, len(segments))
+            return segments
+
+        except Exception as e:
+            logger.warning("Diarization failed (%s). Continuing without speaker info.", e)
+            return []

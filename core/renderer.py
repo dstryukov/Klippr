@@ -2,6 +2,7 @@ import os
 import subprocess
 import logging
 import re
+import time
 from config import settings
 import cv2
 
@@ -176,6 +177,7 @@ class VerticalRenderer:
         title: str = "",
         clip_start: float = 0.0,
         clip_end: float = 0.0,
+        hook_text: str = "",
     ):
         font_size = int(getattr(settings, "SUBTITLE_FONT_SIZE", 70))
         primary = self._ass_color(getattr(settings, "SUBTITLE_COLOR", "#FFFFFF"))
@@ -197,7 +199,24 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,Arial Black,{font_size},{primary},{active},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,5,0,2,40,40,{word_margin_v},1
 Style: Title,Arial Black,{title_size},{primary},{active},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,5,0,5,40,40,{title_margin_v},1
+"""
+        # Hook overlay style (rendered at top of video for first few seconds)
+        hook_enabled = bool(getattr(settings, "HOOK_OVERLAY_ENABLED", True))
+        if hook_enabled and hook_text:
+            hook_font_size = int(getattr(settings, "HOOK_OVERLAY_FONT_SIZE", 80))
+            hook_color = self._ass_color(getattr(settings, "HOOK_OVERLAY_COLOR", "#FFFFFF"))
+            hook_bg = self._ass_color(getattr(settings, "HOOK_OVERLAY_BG_COLOR", "#000000"))
+            # Semi-transparent background via BackColour with alpha
+            hook_bg_semi = hook_bg.replace("&H00", "&H80", 1) if hook_bg.startswith("&H00") else hook_bg
+            hook_outline = self._ass_color("#000000", default="&H00000000")
+            hook_margin_v = int(self.resolution[1] * 0.04)
+            ass_content += (
+                f"Style: HookOverlay,Arial Black,{hook_font_size},{hook_color},"
+                f"{hook_color},{hook_outline},{hook_bg_semi},-1,0,0,0,100,100,0,0,1,6,2,8,"
+                f"60,60,{hook_margin_v},1\n"
+            )
 
+        ass_content += """
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
@@ -243,6 +262,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             event_end = self._format_time(max(clip_end - clip_start, 1.0))
             ass_content += f"Dialogue: 0,{event_start},{event_end},Title,,0,0,0,,{text}\n"
 
+        # Hook overlay: show hook text at top for first N seconds
+        if hook_enabled and hook_text:
+            hook_duration = int(getattr(settings, "HOOK_OVERLAY_DURATION", 4))
+            clip_duration = max(0.1, clip_end - clip_start)
+            hook_end = min(hook_duration, clip_duration)
+            escaped_hook = self._escape_ass_text(hook_text)
+            # Add fade-in effect (200ms) and fade-out (300ms)
+            ass_content += (
+                f"Dialogue: 1,0:00:00.00,{self._format_time(hook_end)},"
+                f"HookOverlay,,0,0,0,,"
+                f"{{\\fad(200,300)}}{escaped_hook}\n"
+            )
+
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(ass_content)
 
@@ -278,6 +310,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return crop_w, crop_h, x1, y1
 
     def _generate_face_tracking_metadata(self, video_path: str, start: float, end: float, output_path: str):
+        """Two-pass face tracking with adaptive EMA, velocity clamp, and lookahead smoothing.
+
+        Pass 1: detect faces every N frames, build raw center_x trajectory with adaptive EMA.
+        Pass 2: apply sliding-window (lookahead) smoothing for jitter-free output.
+        """
         cap = cv2.VideoCapture(video_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -285,9 +322,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
         crop_w, crop_h, x1, y1 = self._smart_crop_params(orig_w, orig_h)
         last_center_x = x1 + crop_w / 2.0
+
+        # Configurable parameters
+        skip_frames = int(getattr(settings, "FACE_TRACKING_SKIP_FRAMES", 5))
+        max_shift_px = int(getattr(settings, "FACE_TRACKING_MAX_SHIFT", 40))
+        lookahead_window = int(getattr(settings, "FACE_TRACKING_LOOKAHEAD", 5))
+
+        # --- Pass 1: build raw trajectory with adaptive EMA + velocity clamp ---
+        raw_centers: list[tuple[float, float]] = []  # (timestamp_rel, center_x)
         frame_idx = 0
-        skip_frames = 3
-        out_f = open(output_path, "w", encoding="utf-8")
+        prev_crop_x: float | None = None
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -295,6 +340,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             if current_time > end:
                 break
+            timestamp_rel = max(0.0, current_time - start)
+
             if frame_idx % skip_frames == 0:
                 results = self.yolo_model(frame, classes=[0], verbose=False)
                 boxes = results[0].boxes
@@ -311,13 +358,48 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                                 best_center_x = float(kpts[0][0]) if len(kpts) > 0 and kpts[0][0] > 0 else (x_a + x_b) / 2.0
                             else:
                                 best_center_x = (x_a + x_b) / 2.0
-                    last_center_x = 0.82 * last_center_x + 0.18 * best_center_x
-            crop_w, crop_h, x1, y1 = self._smart_crop_params(orig_w, orig_h, center_x=last_center_x)
-            timestamp_rel = max(0.0, current_time - start)
-            out_f.write(f"{timestamp_rel:.3f}-{timestamp_rel + 0.5:.3f} crop x {x1};\n")
+
+                    # Adaptive EMA: alpha scales with velocity
+                    velocity = abs(best_center_x - last_center_x)
+                    alpha = max(0.05, min(0.35, 0.05 + 0.003 * velocity))
+                    last_center_x = (1.0 - alpha) * last_center_x + alpha * best_center_x
+                # else: no face detected, keep last_center_x unchanged
+
+            # Velocity clamp on crop_x
+            crop_w_f, crop_h_f, new_x1, new_y1 = self._smart_crop_params(orig_w, orig_h, center_x=last_center_x)
+            if prev_crop_x is not None:
+                delta = new_x1 - prev_crop_x
+                if abs(delta) > max_shift_px:
+                    new_x1 = int(prev_crop_x + max_shift_px * (1 if delta > 0 else -1))
+            prev_crop_x = float(new_x1)
+
+            raw_centers.append((timestamp_rel, last_center_x))
             frame_idx += 1
-        out_f.close()
+
         cap.release()
+
+        # --- Pass 2: lookahead smoothing (sliding window average) ---
+        if len(raw_centers) > lookahead_window * 2:
+            smoothed: list[float] = []
+            half_w = max(1, lookahead_window // 2)
+            center_values = [c[1] for c in raw_centers]
+            for i in range(len(center_values)):
+                lo = max(0, i - half_w)
+                hi = min(len(center_values), i + half_w + 1)
+                window = center_values[lo:hi]
+                smoothed.append(sum(window) / len(window))
+        else:
+            smoothed = [c[1] for c in raw_centers]
+
+        # --- Write sendcmd file ---
+        out_f = open(output_path, "w", encoding="utf-8")
+        for i, (ts_rel, _) in enumerate(raw_centers):
+            cx = smoothed[i]
+            crop_w_f, crop_h_f, x1_f, y1_f = self._smart_crop_params(orig_w, orig_h, center_x=cx)
+            next_ts = raw_centers[i + 1][0] if i + 1 < len(raw_centers) else ts_rel + 0.5
+            out_f.write(f"{ts_rel:.3f}-{next_ts:.3f} crop x {x1_f};\n")
+        out_f.close()
+
         return crop_w, crop_h, y1
 
     def _ass_filter_path(self, path: str) -> str:
@@ -350,6 +432,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     def render_clip(self, video_path: str, highlight: dict, output_path: str, transcript: list[dict] = None):
         logger.info(f"Starting render for clip: '{highlight.get('title')}'")
+        t0 = time.monotonic()
         start = float(highlight["start_time"])
         end = float(highlight["end_time"])
         duration = max(0.1, end - start)
@@ -359,13 +442,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for seg in transcript:
                 if seg['start'] < end and seg['end'] > start:
                     valid_segments.append(seg)
-        self._generate_ass_file(valid_segments, self.subtitle_style, ass_path, highlight.get('title', ''), clip_start=start, clip_end=end)
+        self._generate_ass_file(valid_segments, self.subtitle_style, ass_path, highlight.get('title', ''), clip_start=start, clip_end=end, hook_text=highlight.get('hook_text', ''))
         ass_path_escaped = self._ass_filter_path(ass_path)
         orig_w, orig_h = self._get_video_dimensions(video_path)
         if self.crop_mode == "face_tracking":
             cmd_path = os.path.join(self.output_dir, f"crop_{os.path.basename(output_path)}.cmd")
             logger.info("Generating face tracking metadata...")
+            t_track = time.monotonic()
             crop_w, crop_h, crop_y = self._generate_face_tracking_metadata(video_path, start, end, cmd_path)
+            logger.info("Face tracking metadata generated in %.1fs", time.monotonic() - t_track)
             cmd_path_escaped = cmd_path.replace("\\", "/")
             crop_filter = f"sendcmd=f='{cmd_path_escaped}',crop={crop_w}:{crop_h}:0:{crop_y}"
         else:
@@ -383,16 +468,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         logger.info("Rendering vertical clip at %sx%s using %s with frame-accurate trim", self.resolution[0], self.resolution[1], vcodec)
         command = self._build_render_command(video_path, output_path, start, end, vf_chain, vcodec, preset, crf, use_nvenc)
         logger.info(f"Running FFmpeg: {' '.join(command)}")
+        t_ffmpeg = time.monotonic()
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0 and use_nvenc:
-            logger.warning("NVENC render failed, retrying with CPU libx264. Error was:\n%s", result.stderr)
+            logger.warning("NVENC render failed after %.1fs, retrying with CPU libx264. Error was:\n%s", time.monotonic() - t_ffmpeg, result.stderr)
             command = self._build_render_command(video_path, output_path, start, end, vf_chain, "libx264", preset, crf, False)
             logger.info(f"Running FFmpeg fallback: {' '.join(command)}")
+            t_ffmpeg = time.monotonic()
             result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(f"FFmpeg failed with error:\n{result.stderr}")
             raise RuntimeError(f"FFmpeg render failed: {result.stderr}")
-        logger.info(f"Clip successfully rendered to {output_path}")
+        logger.info("FFmpeg encode took %.1fs", time.monotonic() - t_ffmpeg)
+        logger.info("Clip '%s' rendered in %.1fs total", highlight.get('title'), time.monotonic() - t0)
         try:
             if os.path.exists(ass_path):
                 os.remove(ass_path)

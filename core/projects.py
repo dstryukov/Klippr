@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,10 @@ def candidates_file(project_id: str) -> Path:
     return project_dir(project_id) / "candidates.json"
 
 
+def diarization_file(project_id: str) -> Path:
+    return project_dir(project_id) / "diarization.json"
+
+
 def tmp_dir(project_id: str) -> Path:
     path = project_dir(project_id) / "tmp"
     path.mkdir(parents=True, exist_ok=True)
@@ -68,6 +73,7 @@ def create_project(name: str, source_url: str = "") -> dict[str, Any]:
         "video_path": "",
         "audio_path": "",
         "transcript_path": "",
+        "diarization_path": "",
         "candidates_path": "",
         "selected_candidate_ids": [],
         "clips": [],
@@ -89,6 +95,7 @@ def ensure_project_shape(project: dict[str, Any], fallback_id: str | None = None
     project.setdefault("video_path", "")
     project.setdefault("audio_path", "")
     project.setdefault("transcript_path", "")
+    project.setdefault("diarization_path", "")
     project.setdefault("candidates_path", "")
     project.setdefault("selected_candidate_ids", [])
     project.setdefault("clips", [])
@@ -145,6 +152,26 @@ def save_transcript(project_id: str, transcript: list[dict[str, Any]]) -> str:
 
 def load_transcript(project_id: str) -> list[dict[str, Any]]:
     path = transcript_file(project_id)
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_diarization(project_id: str, diarization: list[dict[str, Any]]) -> str:
+    path = diarization_file(project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(diarization or [], f, ensure_ascii=False, indent=2)
+    return str(path)
+
+
+def load_diarization(project_id: str) -> list[dict[str, Any]]:
+    path = diarization_file(project_id)
     if not path.exists():
         return []
     try:
@@ -215,4 +242,55 @@ def add_clip(project: dict[str, Any], clip_path: str, candidate: dict[str, Any])
         "end_time": candidate.get("end_time"),
         "created_at": utc_now_iso(),
     })
+    return save_project(project)
+
+
+def delete_project(project_id: str) -> bool:
+    """Delete an entire project directory and all its contents."""
+    root = project_dir(project_id)
+    if not root.exists():
+        raise FileNotFoundError(f"Project not found: {project_id}")
+    shutil.rmtree(root, ignore_errors=True)
+    return True
+
+
+def delete_candidate(project_id: str, candidate_id: str) -> list[dict[str, Any]]:
+    """Remove a candidate by id and persist the updated list."""
+    candidates = load_candidates(project_id)
+    filtered = [c for c in candidates if str(c.get("id")) != str(candidate_id)]
+    if len(filtered) == len(candidates):
+        raise ValueError(f"Candidate not found: {candidate_id}")
+    save_candidates(project_id, filtered)
+
+    # Also remove from selected_candidate_ids
+    try:
+        project = load_project(project_id)
+        project["selected_candidate_ids"] = [
+            cid for cid in project.get("selected_candidate_ids", [])
+            if str(cid) != str(candidate_id)
+        ]
+        save_project(project)
+    except Exception:
+        pass
+
+    return filtered
+
+
+def remove_clip(project_id: str, clip_index: int) -> dict[str, Any]:
+    """Remove a rendered clip by index from the project and delete the file."""
+    project = load_project(project_id)
+    clips = project.get("clips", [])
+    if clip_index < 0 or clip_index >= len(clips):
+        raise IndexError(f"Clip index out of range: {clip_index}")
+
+    removed = clips.pop(clip_index)
+
+    # Delete the actual file if it exists
+    clip_path = removed.get("path", "")
+    if clip_path:
+        p = Path(clip_path)
+        if p.exists():
+            p.unlink()
+
+    project["clips"] = clips
     return save_project(project)
